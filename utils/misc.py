@@ -1,11 +1,6 @@
-from matplotlib import pyplot as plt
 import torch
 import numpy as np
-import os, os.path as osp
-import shutil
-from torch.utils.tensorboard import SummaryWriter
 import logging, platform
-from datetime import datetime
 
 
 def seed_everything(seed):
@@ -51,50 +46,9 @@ def get_bbox(mask, padding):
     return yl, yr, xl, xr
 
 
-def create_log(log_dir, name, debug=False):
-    os.makedirs(osp.join(log_dir, "viz_step"), exist_ok=True)
-    backup_dir = osp.join(log_dir, "backup")
-    os.makedirs(backup_dir, exist_ok=True)
-    shutil.copyfile(__file__, osp.join(backup_dir, osp.basename(__file__)))
-    shutil.copytree("lib_gart", osp.join(backup_dir, "lib_gart"), dirs_exist_ok=True)
-    writer = SummaryWriter(log_dir=log_dir)
-    # backup all notebooks
-    os.system(f"cp ./*.ipynb {backup_dir}/")
-
-    # also set the logging to print to terminal and the file
-    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    configure_logging(osp.join(log_dir, f"{current_datetime}.log"), debug=debug, name=name)
-    return writer
-
-
 class HostnameFilter(logging.Filter):
     hostname = platform.node()
 
     def filter(self, record):
         record.hostname = HostnameFilter.hostname
         return True
-
-
-def configure_logging(log_path, debug=False, name="default"):
-    """
-    https://github.com/facebookresearch/DeepSDF
-    """
-    logging.getLogger().handlers.clear()
-    logger = logging.getLogger()
-    if debug:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
-    logger_handler = logging.StreamHandler()
-    logger_handler.addFilter(HostnameFilter())
-    formatter = logging.Formatter(
-        "| %(hostname)s | %(levelname)s | %(asctime)s | %(message)s   [%(filename)s:%(lineno)d]",
-        "%b-%d-%H:%M:%S",
-    )
-    logger_handler.setFormatter(formatter)
-    logger.addHandler(logger_handler)
-    
-    file_logger_handler = logging.FileHandler(log_path)
-    
-    file_logger_handler.setFormatter(formatter)
-    logger.addHandler(file_logger_handler)

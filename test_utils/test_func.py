@@ -9,17 +9,11 @@ from eval_utils_instant_avatar import Evaluator as EvalAvatar
 from eval_utils_instant_nvr import Evaluator as EvalNVR
 from eval_utils_instant_avatar_brightness import Evaluator as EvalAvatarBrightness
 
-from typing import Union
 from lib_render.gauspl_renderer import render_cam_pcl
 import cv2, glob
 import pandas as pd
 from tqdm import tqdm
-import imageio
-from lib_data.instant_avatar_people_snapshot import Dataset as InstantAvatarDataset
 from lib_data.zju_mocap import Dataset as ZJUDataset, get_batch_sampler
-from lib_data.instant_avatar_wild import Dataset as InstantAvatarWildDataset
-from lib_data.dog_demo import Dataset as DogDemoDataset
-from matplotlib import pyplot as plt
 import logging
 
 
@@ -37,25 +31,6 @@ def get_evaluator(mode, device):
     return evaluator
 
 
-class TrainingSeqWrapper:
-    def __init__(self, seq) -> None:
-        self.seq = seq
-
-    def __len__(self):
-        return self.seq.total_t
-
-    def __getitem__(self, idx):
-        data = {}
-        data["rgb"] = self.seq.rgb_list[idx]
-        data["mask"] = self.seq.mask_list[idx]
-        data["K"] = self.seq.K_list[idx]
-        data["smpl_pose"] = torch.cat(
-            [self.seq.pose_base_list[idx], self.seq.pose_rest_list[idx]], dim=0
-        )
-        data["smpl_trans"] = self.seq.global_trans_list[idx]
-        return data, {}
-
-
 def test(
     solver,
     seq_name: str,
@@ -66,80 +41,18 @@ def test(
     pose_base_lr=3e-3,
     pose_rest_lr=3e-3,
     trans_lr=3e-3,
-    dataset_mode="people_snapshot",
-    training_optimized_seq=None,
+    dataset_mode="zju",
 ):
     device = solver.device
     model = solver.load_saved_model()
-
-    assert dataset_mode in [
-        "people_snapshot",
-        "zju",
-        "instant_avatar_wild",
-        "dog_demo",
-    ], f"Unknown dataset mode {dataset_mode}"
-
-    if dataset_mode == "people_snapshot":
-        eval_mode = "avatar"
-        bg = [1.0, 1.0, 1.0]
-        test_dataset = InstantAvatarDataset(
-            noisy_flag=False,
-            data_root="./data/people_snapshot/",
-            video_name=seq_name,
-            split="test",
-            image_zoom_ratio=0.5,
-        )
-    elif dataset_mode == "zju":
-        eval_mode = "nvr"
-        test_dataset = ZJUDataset(
-            data_root="./data/zju_mocap",
-            video_name=seq_name,
-            split="test",
-            image_zoom_ratio=0.5,
-        )
-        bg = [0.0, 0.0, 0.0]  # zju use black background
-    elif dataset_mode == "instant_avatar_wild":
-        eval_mode = "avatar"
-        test_dataset = InstantAvatarWildDataset(
-            data_root="./data/insav_wild",
-            video_name=seq_name,
-            split="test",
-            image_zoom_ratio=1.0,
-            # ! warning, here follow the `ubc_hard.yaml` in InstAVT setting, use slicing
-            start_end_skip=[2, 1000000000, 4],
-        )
-        bg = [1.0, 1.0, 1.0]
-
-        test_len = len(test_dataset)
-        assert (training_optimized_seq.total_t == test_len) or (
-            training_optimized_seq.total_t == 1 + test_len
-        ), "Now UBC can only support the same length of training and testing or + 1"
-        test_dataset.smpl_params["body_pose"] = (
-            training_optimized_seq.pose_rest_list.reshape(-1, 69)[:test_len]
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        test_dataset.smpl_params["global_orient"] = (
-            training_optimized_seq.pose_base_list.reshape(-1, 3)[:test_len]
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        test_dataset.smpl_params["transl"] = (
-            training_optimized_seq.global_trans_list.reshape(-1, 3)[:test_len]
-            .detach()
-            .cpu()
-            .numpy()
-        )
-    elif dataset_mode == "dog_demo":
-        eval_mode = "avatar_brightness"
-        bg = [1.0, 1.0, 1.0]
-        test_dataset = DogDemoDataset(
-            data_root="./data/dog_data_official/", video_name=seq_name, test=True
-        )
-    else:
-        raise NotImplementedError()
+    eval_mode = "nvr"
+    test_dataset = ZJUDataset(
+        data_root="./data/zju_mocap",
+        video_name=seq_name,
+        split="test",
+        image_zoom_ratio=0.5,
+    )
+    bg = [0.0, 0.0, 0.0]  # zju use black background
 
     evaluator = get_evaluator(eval_mode, device)
 
@@ -190,7 +103,6 @@ def _save_eval_maps(
     device=torch.device("cuda:0"),
 ):
     model.eval()
-    
     if tto_flag:
         test_save_dir_tto = osp.join(log_dir, f"{save_name}_tto")
         os.makedirs(test_save_dir_tto, exist_ok=True)
@@ -198,26 +110,20 @@ def _save_eval_maps(
         test_save_dir = osp.join(log_dir, save_name)
         os.makedirs(test_save_dir, exist_ok=True)
 
-    if dataset_mode == "zju":
-        # ! follow instant-nvr evaluation
-        iter_test_dataset = torch.utils.data.DataLoader(
-            test_dataset,
-            batch_sampler=get_batch_sampler(test_dataset, frame_sampler_interval=6),
-            num_workers=0,
-        )
-    else:
-        iter_test_dataset = test_dataset
-
-    logging.info(
-        f"Saving images [TTO={tto_flag}] [N={len(iter_test_dataset)}]..."
+    # ! follow instant-nvr evaluation
+    iter_test_dataset = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_sampler=get_batch_sampler(test_dataset, frame_sampler_interval=6),
+        num_workers=0,
     )
+
+    logging.info(f"Saving images [TTO={tto_flag}] [N={len(iter_test_dataset)}]...")
     for batch_idx, batch in tqdm(enumerate(iter_test_dataset)):
         # get data
         data, meta = batch
 
-        if dataset_mode == "zju":
-            for k in data.keys():
-                data[k] = data[k].squeeze(0)
+        for k in data.keys():
+            data[k] = data[k].squeeze(0)
 
         rgb_gt = torch.as_tensor(data["rgb"])[None].float().to(device)
         mask_gt = torch.as_tensor(data["mask"])[None].float().to(device)
@@ -225,26 +131,12 @@ def _save_eval_maps(
         K = torch.as_tensor(data["K"]).float().to(device)
         pose = torch.as_tensor(data["smpl_pose"]).float().to(device)[None]
         trans = torch.as_tensor(data["smpl_trans"]).float().to(device)[None]
-            
-        if dataset_mode == "zju":
-            fn = f"frame{int(meta['frame_idx']):04d}_view{int(meta['cam_ind']):04d}.png"
-        else:
-            fn = f"{batch_idx}.png"
-            
+        fn = f"frame{int(meta['frame_idx']):04d}_view{int(meta['cam_ind']):04d}.png"
         if tto_flag:
             # change the pose from the dataset to fit the test view
             pose_b, pose_r = pose[:, :1], pose[:, 1:]
             model.eval()
-            # * for delta list
-            try:
-                list_flag = model.add_bones.mode in ["delta-list"]
-            except:
-                list_flag = False
-            if list_flag:
-                As = model.add_bones(t=batch_idx)  # B,K,4,4, the nearest pose
-            else:
-                As = None  # place holder
-            new_pose_b, new_pose_r, new_trans, As = solver.testtime_pose_optimization(
+            new_pose_b, new_pose_r, new_trans = solver.testtime_pose_optimization(
                 data_pack=[
                     rgb_gt,
                     mask_gt,
@@ -262,7 +154,6 @@ def _save_eval_maps(
                 steps=tto_step,
                 decay_steps=tto_decay,
                 decay_factor=tto_decay_factor,
-                As=As,
             )
             pose = torch.cat([new_pose_b, new_pose_r], dim=1).detach()
             trans = new_trans.detach()
@@ -279,7 +170,6 @@ def _save_eval_maps(
                 rgb_gt,
                 save_fn,
                 time_index=batch_idx,
-                As=As,
             )
         else:
             save_fn = osp.join(test_save_dir, fn)
@@ -291,14 +181,12 @@ def _save_eval_maps(
 
 @torch.no_grad()
 def _save_render_image_from_pose(
-    model, pose, trans, H, W, K, bg, rgb_gt, save_fn, time_index=None, As=None
+    model, pose, trans, H, W, K, bg, rgb_gt, save_fn, time_index=None
 ):
     act_sph_order = model.max_sph_order
     device = pose.device
     # TODO: handle novel time!, not does not pass in means t=None; Can always use TTO to directly find As!
     additional_dict = {"t": time_index}
-    if As is not None:
-        additional_dict["As"] = As
     mu, fr, sc, op, sph, _ = model(
         pose, trans, additional_dict=additional_dict, active_sph_order=act_sph_order
     )  # TODO: directly input optimized As!
@@ -391,5 +279,7 @@ if __name__ == "__main__":
     evaluator.to(torch.device("cuda:0"))
     evaluator.eval()
     _evaluate_dir(
-        evaluator, "./logs/exmaple/1_seq=shiba_prof=dog_data_official=dog_demo/", "test_tto"
+        evaluator,
+        "./logs/exmaple/1_seq=shiba_prof=dog_data_official=dog_demo/",
+        "test_tto",
     )

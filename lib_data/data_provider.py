@@ -1,8 +1,8 @@
 import torch, numpy as np
 from tqdm import tqdm
-from transforms3d.euler import mat2euler, euler2mat
+from transforms3d.euler import euler2mat
 from transforms3d.axangles import axangle2mat, mat2axangle
-from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
+from pytorch3d.transforms import matrix_to_axis_angle
 from sklearn.neighbors import KernelDensity
 from torch import nn
 from matplotlib import pyplot as plt
@@ -129,13 +129,6 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         self.register_buffer("pose_list_original", pose_list.clone())
         self.register_buffer("global_trans_list_original", global_trans_list.clone())
 
-        # # * Unsupervised Bones
-        # self.complement_As = complement_As
-        # self.complement_As_type = complement_As_type
-        # assert complement_As_type in ["mtx", "posetime"]
-        # if complement_As > 0 and complement_As_type == "mtx":
-        #     self.additional_dr = nn.Parameter(torch.zeros(self.T, complement_As, 3))
-        #     self.additional_dt = nn.Parameter(torch.zeros(self.T, complement_As, 3))
         return
 
     def move_images_to_device(self, device):
@@ -144,28 +137,10 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         self.K_list = self.K_list.to(device)
         self.betas = self.betas.to(device)
 
-    @property
-    def total_t(self):
-        return len(self.rgb_list)
-
-    # def roll_out_complement(self):
-    #     if self.complement_As_type == "posetime":
-    #         t = torch.arange(self.T).float().to(self.device) / (self.T - 1)
-    #         pose = self.pose_rest_list
-    #         pose_t = torch.cat([t[:, None], pose], dim=-1)
-    #         return pose_t
-    #     else:
-    #         R = axis_angle_to_matrix(self.additional_dr)
-    #         dT = torch.eye(4).to(R.device)[None, None].repeat(self.T, R.shape[1], 1, 1)
-    #         dT[:, :, :3, :3] = dT[:, :, :3, :3] * 0 + R
-    #         dT[:, :, :3, 3] = dT[:, :, :3, 3] * 0 + self.additional_dt
-    #         # T = dT
-    #         # this assumes continuous frames, single frame!
-    #         T = [dT[0]]
-    #         for i in range(1, self.T):
-    #             T.append(torch.einsum("nij, njk->nik", T[-1], dT[i]))
-    #         T = torch.stack(T, dim=0)
-    #         return T
+    # TODO: remove laters
+    # @property
+    # def total_t(self):
+    #     return len(self.rgb_list)
 
     @property
     def pose_diff(self):
@@ -224,11 +199,6 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         pose_rest = self.pose_rest_list[t]
         global_trans = self.global_trans_list[t]
 
-        # if self.complement_As > 0:
-        #     Ts = self.roll_out_complement()
-        #     complement_Ts = Ts[t]
-        #     return gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, complement_Ts
-        # else:
         return (
             gt_rgb.to(device),
             gt_mask.to(device),
@@ -273,10 +243,7 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
             return rgb_list, mask_list, K_list, pose_list, global_trans_list, betas
 
         # * Weight the views
-        if pose_list.ndim == 3:
-            global_rot = [p[0].detach().cpu().numpy() for p in pose_list]
-        else: # dog
-            global_rot = [p[:3].detach().cpu().numpy() for p in pose_list]
+        global_rot = [p[0].detach().cpu().numpy() for p in pose_list]
         rot_list = []
         for w in tqdm(global_rot):
             angle = np.linalg.norm(w)

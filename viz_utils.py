@@ -1,10 +1,8 @@
-from matplotlib import pyplot as plt
-from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
+from pytorch3d.transforms import matrix_to_axis_angle
 import imageio
 import torch
-from tqdm import tqdm
 import numpy as np
-import warnings, os, os.path as osp, shutil, sys
+import os, os.path as osp
 from transforms3d.euler import euler2mat
 from lib_data.data_provider import RealDataOptimizablePoseProviderPose
 
@@ -84,68 +82,6 @@ def viz_spinning(
 
 
 @torch.no_grad()
-def viz_spinning_self_rotate(
-    model,
-    base_R,
-    pose,
-    trans,
-    H,
-    W,
-    K,
-    save_path,
-    time_index=None,
-    n_spinning=10,
-    model_mask=None,
-    active_sph_order=0,
-    bg_color=[1.0, 1.0, 1.0],
-):
-    device = pose.device
-    viz_frames = []
-    # base_R = base_R.detach().cpu().numpy()
-    first_R = axis_angle_to_matrix(pose[:, 0])[0].detach().cpu().numpy()
-    for vid in range(n_spinning):
-        rotation = euler2mat(0.0, 2 * np.pi * vid / n_spinning, 0.0, "sxyz")
-        rotation = torch.from_numpy(first_R @ rotation).float().to(device)
-        pose[:, 0] = matrix_to_axis_angle(rotation[None])[0]
-
-        mu, fr, s, o, sph, additional_ret = model(
-            pose, trans, {"t": time_index}, active_sph_order=active_sph_order
-        )
-        if model_mask is not None:
-            assert len(model_mask) == mu.shape[1]
-            mu = mu[:, model_mask.bool()]
-            fr = fr[:, model_mask.bool()]
-            s = s[:, model_mask.bool()]
-            o = o[:, model_mask.bool()]
-            sph = sph[:, model_mask.bool()]
-
-        render_pkg = render_cam_pcl(
-            mu[0],
-            fr[0],
-            s[0],
-            o[0],
-            sph[0],
-            H,
-            W,
-            K,
-            False,
-            active_sph_order,
-            bg_color=bg_color,
-        )
-        viz_frame = (
-            torch.clamp(render_pkg["rgb"], 0.0, 1.0)
-            .permute(1, 2, 0)
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        viz_frame = (viz_frame * 255).astype(np.uint8)
-        viz_frames.append(viz_frame)
-    imageio.mimsave(save_path, viz_frames)
-    return
-
-
-@torch.no_grad()
 def viz_human_all(
     solver,
     data_provider: RealDataOptimizablePoseProviderPose = None,
@@ -157,7 +93,6 @@ def viz_human_all(
     model=None,
     model_mask=None,
     viz_name="",
-    export_mesh_flag=False,  # remove this from release version
 ):
     if model is None:
         model = solver.load_saved_model(ckpt_dir)
@@ -249,26 +184,6 @@ def viz_human_all(
 
     for name, pose in to_viz.items():
         print(f"Viz novel {name}...")
-        # if export_mesh_flag:
-        #     from lib_marchingcubes.gaumesh_utils import MeshExtractor
-        #     # also extract a mesh
-        #     mesh = solver.extract_mesh(model, pose)
-        #     mesh.export(f"{viz_dir}/mc_{name}.obj", "obj")
-
-        # # for making figures, the rotation is in another way
-        # viz_spinning_self_rotate(
-        #     model,
-        #     solver.viz_base_R.detach(),
-        #     pose,
-        #     global_trans_list[0][None],
-        #     H,
-        #     W,
-        #     K_list[0],
-        #     f"{viz_dir}/{name}_selfrotate.gif",
-        #     time_index=None,  # if set to None and use t, the add_bone will hand this
-        #     n_spinning=n_spinning,
-        #     active_sph_order=model.max_sph_order,
-        # )
         viz_spinning(
             model,
             pose,
@@ -350,211 +265,4 @@ def viz_human_all(
             viz_frame = (viz_frame * 255).astype(np.uint8)
             viz_frames.append(viz_frame)
         imageio.mimsave(f"{viz_dir}/novel_pose_{name}.gif", viz_frames)
-    return
-
-
-def viz_dog_spin(
-    model, pose, trans, H, W, K, save_path, n_spinning=10, device="cuda:0"
-):
-    BASE_R = np.asarray(euler2mat(np.pi / 2.0, 0, np.pi, "rxyz"))
-    novel_view_pitch = 0.15  # or 0
-
-    viz_frames = []
-    angles = np.linspace(0.65, 0.90, n_spinning)
-    angles = np.concatenate([angles, angles[::-1]])
-
-    for angle in angles:
-        rotation = euler2mat(2 * np.pi * angle, novel_view_pitch, 0.0, "syxz")
-        rotation = torch.from_numpy(rotation @ BASE_R).float().to(device)
-        pose[:, :3] = matrix_to_axis_angle(rotation[None])[0]
-
-        mu, fr, s, o, sph, additional_ret = model(
-            pose, trans, {}, active_sph_order=model.max_sph_order
-        )
-
-        render_pkg = render_cam_pcl(
-            mu[0],
-            fr[0],
-            s[0],
-            o[0],
-            sph[0],
-            H,
-            W,
-            K,
-            False,
-            model.max_sph_order,
-            bg_color=[1.0, 1.0, 1.0],
-        )
-
-        viz_frame = (
-            torch.clamp(render_pkg["rgb"], 0.0, 1.0)
-            .permute(1, 2, 0)
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        viz_frame = (viz_frame * 255).astype(np.uint8)
-        viz_frames.append(viz_frame)
-
-    imageio.mimsave(save_path, viz_frames, fps=30)
-
-    return
-
-def viz_dog_spin2(model, pose, trans, H, W, K, save_path, n_spinning=20):
-
-    device = trans.device
-    BASE_R = np.asarray(euler2mat(np.pi / 2.0, 0, np.pi, "rxyz"))
-    trans = trans.detach().clone()
-
-    viz_frames = []
-    for vid in range(n_spinning):
-        rotation = euler2mat(
-            2 * np.pi * vid / n_spinning, 0.0, 0.0, "syxz"
-        )
-        rotation = torch.from_numpy(rotation @ BASE_R).float().to(device)
-        pose[:, :3] = matrix_to_axis_angle(rotation[None])[0]
-        mu, fr, s, o, sph, additional_ret = model(pose, trans, active_sph_order=model.max_sph_order)
-        render_pkg = render_cam_pcl(
-            mu[0],
-            fr[0],
-            s[0],
-            o[0],
-            sph[0],
-            H,
-            W,
-            K,
-            False,
-            model.max_sph_order,
-            bg_color=[1.0, 1.0, 1.0],
-        )
-        viz_frame = (
-            torch.clamp(render_pkg["rgb"], 0.0, 1.0).permute(1, 2, 0).detach().cpu().numpy()
-        )
-        viz_frame = (viz_frame * 255).astype(np.uint8)
-        viz_frames.append(viz_frame)
-    imageio.mimsave(save_path, viz_frames)
-    return
-
-
-def viz_dog_animation(
-    model, animation, limb, trans, H, W, K, save_path, fps=24, device="cuda:0"
-):
-    yaw = 0.65
-    novel_view_pitch = 0.15
-    BASE_R = np.asarray(euler2mat(np.pi / 2.0, 0, np.pi, "rxyz"))
-    rotation = euler2mat(2 * np.pi * yaw, novel_view_pitch, 0.0, "syxz")
-    rotation = torch.from_numpy(rotation @ BASE_R).float().to(device)
-    orient = matrix_to_axis_angle(rotation[None])[0]
-
-    viz_frames = []
-    for pose in animation:
-        pose = pose.reshape(1, -1)
-        pose = torch.cat([pose, limb], dim=1)
-
-        mu, fr, s, o, sph, additional_ret = model(
-            pose, trans, {}, active_sph_order=model.max_sph_order
-        )
-
-        render_pkg = render_cam_pcl(
-            mu[0],
-            fr[0],
-            s[0],
-            o[0],
-            sph[0],
-            H,
-            W,
-            K,
-            False,
-            model.max_sph_order,
-            bg_color=[1.0, 1.0, 1.0],
-        )
-
-        viz_frame = (
-            torch.clamp(render_pkg["rgb"], 0.0, 1.0)
-            .permute(1, 2, 0)
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        viz_frame = (viz_frame * 255).astype(np.uint8)
-        viz_frames.append(viz_frame)
-
-    imageio.mimsave(save_path, viz_frames, fps=fps)
-
-
-@torch.no_grad()
-def viz_dog_all(solver, data_provider, model=None, ckpt_dir=None, viz_name=""):
-    if model is None:
-        model = solver.load_saved_model(ckpt_dir)
-    model.eval()
-    viz_dir = osp.join(solver.log_dir, f"{viz_name}_dog_viz")
-    os.makedirs(viz_dir, exist_ok=True)
-
-    viz_pose = (
-        torch.cat([data_provider.pose_base_list, data_provider.pose_rest_list], 1)
-        .detach()
-        .clone()
-    )
-    viz_pose = torch.mean(viz_pose, dim=0, keepdim=True)   # use mean pose for viz  
-    limb = viz_pose[:, -7:]                                
-    pose = viz_pose[:, :-7].reshape(-1, 35, 3)
-    pose[:, :-3] = 0  # exclude ears and mouth poses
-
-    viz_pose = torch.concat([pose.reshape(1, -1), limb], dim=1)
-    viz_trans = torch.tensor([[0.0, -0.3, 25.0]], device="cuda:0")
-
-    viz_dog_spin(
-        model.to("cuda"),
-        viz_pose,
-        viz_trans,
-        data_provider.H,
-        data_provider.W,
-        data_provider.K_list[0],
-        save_path=osp.join(viz_dir, "spin.gif"),
-        n_spinning=42,
-    )
-
-    viz_dog_spin2(
-        model.to("cuda"),
-        viz_pose,
-        viz_trans,
-        data_provider.H,
-        data_provider.W,
-        data_provider.K_list[0],
-        save_path=osp.join(viz_dir, "spin2.gif"),
-        n_spinning=20,
-    )
-
-    ######################################################################
-    # Dataset pose seq
-    viz_pose = (
-        torch.cat([data_provider.pose_base_list, data_provider.pose_rest_list], 1)
-        .detach()
-        .clone()
-    )
-    viz_pose = torch.mean(viz_pose, dim=0, keepdim=True)
-    pose = viz_pose[:, :-7].reshape(-1, 35, 3)
-    limb = viz_pose[:, -7:]
-
-    # Animation
-    aroot = osp.join(osp.dirname(__file__), "novel_poses/husky")
-    window = list(range(350, 440))  # Run
-    trans = torch.tensor([[0.3, -0.3, 25.0]], device="cuda:0")
-    files = [f"{aroot}/{i:04d}.npz" for i in window]
-    pose_list = [dict(np.load(file))["pred_pose"] for file in files]
-    pose_list = np.concatenate(pose_list)
-    animation = matrix_to_axis_angle(torch.from_numpy(pose_list)).to(solver.device)
-    animation[:, [32, 33, 34]] = pose[:, [32, 33, 34]] 
-
-    viz_dog_animation(
-        model.to("cuda"),
-        animation,
-        limb,
-        trans,
-        data_provider.H,
-        data_provider.W,
-        data_provider.K_list[0],
-        save_path=osp.join(viz_dir, "animation.gif"),
-        fps=12,
-    )
     return

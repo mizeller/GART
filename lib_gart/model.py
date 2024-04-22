@@ -1,137 +1,31 @@
-import sys, os, os.path as osp
+import sys, os.path as osp
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(osp.dirname(osp.abspath(__file__)))
 
-import numpy as np
-import scipy
 import torch
 from torch import nn
-import torch.nn.functional as F
-
 from optim_utils import *
-from init_helpers import get_near_mesh_init_geo_values, get_on_mesh_init_geo_values, get_inside_mesh_init_geo_values
-import logging
-
-from pytorch3d.transforms import (
-    matrix_to_axis_angle,
-    axis_angle_to_matrix,
-    quaternion_to_matrix,
-    matrix_to_quaternion,
+from init_helpers import (
+    get_near_mesh_init_geo_values,
+    get_on_mesh_init_geo_values,
+    get_inside_mesh_init_geo_values,
 )
+import logging
+from lib_gart.templates import SMPLTemplate
+from pytorch3d.transforms import quaternion_to_matrix
 from model_utils import sph_order2nfeat
 from pytorch3d.ops import knn_points
-
-
-class AdditionalBones(nn.Module):
-    def __init__(
-        self,  # additional bones
-        num_bones: int = 0,
-        total_t: int = 0,  # any usage of time should use this!
-        mode="pose-mlp",
-        # pose-mlp
-        pose_dim=23 * 3,
-        mlp_hidden_dims=[256, 256, 256, 256],
-        mlp_act=nn.LeakyReLU,
-        # pose+t-mlp
-    ):
-        super().__init__()
-        self.num_bones = num_bones
-        if self.num_bones == 0:
-            return
-        self.mode = mode
-        assert self.mode in ["pose-mlp", "pose+t-mlp", "delta-list", "list"]
-        self.total_t = total_t
-
-        if self.mode == "pose-mlp":
-            self.pose_dim = pose_dim
-            self.mlp_layers = nn.ModuleList()
-            c_in = self.pose_dim
-            for c_out in mlp_hidden_dims:
-                self.mlp_layers.append(nn.Sequential(nn.Linear(c_in, c_out), mlp_act()))
-                c_in = c_out
-            self.mlp_output_head = nn.Linear(c_in, 7 * self.num_bones, bias=False)
-            with torch.no_grad():
-                self.mlp_output_head.weight.data = (
-                    torch.randn_like(self.mlp_output_head.weight.data) * 1e-3
-                )
-        elif self.mode == "delta-list":
-            self.dr_list = nn.Parameter(torch.zeros(self.total_t, num_bones, 3))
-            self.dt_list = nn.Parameter(torch.zeros(self.total_t, num_bones, 3))
-        else:
-            raise NotImplementedError()
-
-        return
-
-    def forward(self, pose=None, t=None, As=None):
-        if self.num_bones == 0:
-            # * No additional bones
-            return None
-        if As is not None:
-            # * Directly return if As already provided
-            return As
-        if self.mode == "pose-mlp":
-            assert pose is not None
-            assert pose.ndim == 2 and pose.shape[1] == self.pose_dim
-            B = len(pose)
-            x = pose
-            for layer in self.mlp_layers:
-                x = layer(x)
-            x = self.mlp_output_head(x).reshape(B, -1, 7)
-            q, t = x[:, :, :4], x[:, :, 4:]
-            q[..., 0] = q[..., 0] + 1.0
-            q = F.normalize(q, dim=-1)
-            R = quaternion_to_matrix(q)
-            Rt = torch.cat([R, t[:, :, :, None]], dim=-1)
-            bottom = torch.zeros_like(Rt[:, :, 0:1])
-            bottom[:, :, :, -1] = 1.0
-            As = torch.cat([Rt, bottom], dim=2)
-            return As
-        elif self.mode == "delta-list":
-            As = self._roll_out_continuous_T()
-            if t is None:
-                B = len(pose)
-                # # ! If no time is set, now return eye(4)
-                # ret = (
-                #     torch.eye(4)
-                #     .to(As.device)[None, None]
-                #     .repeat(B, self.num_bones, 1, 1)
-                # )
-                # ! If no time is set, now return first frame
-                ret = As[0][None].repeat(B, 1, 1, 1)
-            else:
-                if isinstance(t, int):
-                    t = torch.tensor([t]).to(As.device)
-                ret = As[t]
-            return ret
-        else:
-            raise NotImplementedError()
-
-        return  # As in canonical frame
-
-    def _roll_out_continuous_T(self):
-        # ! this assumes continuous frames, single frame!
-        R = axis_angle_to_matrix(self.dr_list)
-        dT = (
-            torch.eye(4).to(R.device)[None, None].repeat(self.total_t, R.shape[1], 1, 1)
-        )
-        dT[:, :, :3, :3] = dT[:, :, :3, :3] * 0 + R
-        dT[:, :, :3, 3] = dT[:, :, :3, 3] * 0 + self.dt_list
-        T = [dT[0]]
-        for i in range(1, self.total_t):
-            T.append(torch.einsum("nij, njk->nik", T[-1], dT[i]))
-        T = torch.stack(T, dim=0)
-        return T
 
 
 class GaussianTemplateModel(nn.Module):
     def __init__(
         self,
         template,
-        add_bones: AdditionalBones,
+        betas=None,
         ##################################
         # attr config
         w_correction_flag=True,
-        # w_rest_dim=0,  # additional skinnign weight
+        w_rest_dim=0,  # additional skinnign weight
         f_localcode_dim=0,
         max_sph_order=0,
         w_memory_type="point",
@@ -153,17 +47,23 @@ class GaussianTemplateModel(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.template = template
+        if template is None:
+            template = SMPLTemplate(
+                smpl_model_path="data/smpl_model/SMPL_NEUTRAL.pkl",
+                init_beta=betas,
+                cano_pose_type="da_pose",
+                voxel_deformer_res=64,
+            )
+
+        self.template = template  # SMPLTemplate
         self.num_bones = template.voxel_deformer.num_bones
-        self.add_bones = add_bones
-        self.num_add_bones = add_bones.num_bones
 
         self.max_scale = max_scale
         self.min_scale = min_scale
         self._init_act(self.max_scale, self.min_scale)
         self.opacity_init_logit = self.o_inv_act(opacity_init_value)
 
-        # * init geometry
+        # * init geometry (in zju_3m.yaml -> on_mesh)
         if init_mode == "on_mesh":
             x, q, s, o = get_on_mesh_init_geo_values(
                 template,
@@ -205,7 +105,7 @@ class GaussianTemplateModel(nn.Module):
 
         self.max_sph_order = max_sph_order
         self.w_dc_dim = self.template.dim if w_correction_flag else 0
-        self.w_rest_dim = self.add_bones.num_bones
+        self.w_rest_dim = w_rest_dim
         self.f_localcode_dim = f_localcode_dim
 
         sph_rest_dim = 3 * (sph_order2nfeat(self.max_sph_order) - 1)
@@ -223,10 +123,7 @@ class GaussianTemplateModel(nn.Module):
             self._w_correction_rest = nn.Parameter(torch.zeros(self.N, 0))
             if self.w_dc_dim > 0:
                 self.template.voxel_deformer.enable_voxel_correction()
-            if self.w_rest_dim > 0:
-                self.template.voxel_deformer.enable_additional_correction(
-                    self.w_rest_dim
-                )
+
         elif self.w_memory_type == "hash":
             raise NotImplementedError("TODO")
         else:
@@ -255,8 +152,8 @@ class GaussianTemplateModel(nn.Module):
         msg = ""
         for name, param in self.named_parameters():
             if name.startswith("add_bones"):
-                continue # compact print
-            msg = msg + f"[{name}:{param.numel()/1e3:.1f}K] " 
+                continue  # compact print
+            msg = msg + f"[{name}:{param.numel()/1e3:.1f}K] "
             # logging.info(f"{name}, {param.numel()/1e6:.3f}M")
         logging.info(msg)
         return
@@ -327,10 +224,6 @@ class GaussianTemplateModel(nn.Module):
         self, theta, trans, additional_dict={}, active_sph_order=None, fast=False
     ):
         # * fast will use the cached per point attr, no query anymore
-        # TODO: the additional dict contain info to do flexible skinning: it can contain the As directly for optimization, or it can contain t index to query some buffers to provide As, or it can contain t along with the input theta to query some MLP;
-
-        # TODO: if use vol memory, every forward update self.xxx, and remove them from parameters, pretend that the attributes are per point, but actually they are queried every forward
-
         # theta: B,24,3; trans: B,3
         B = len(theta)
         if active_sph_order is None:
@@ -365,25 +258,6 @@ class GaussianTemplateModel(nn.Module):
         if "pose" not in additional_dict.keys():
             # maybe later we want to viz the different pose effect in cano
             additional_dict["pose"] = theta.reshape(B, -1)[:, 3:]
-        add_A = self.add_bones(**additional_dict)
-        if add_A is not None:
-            if theta.ndim == 2:
-                global_axis_angle = theta[:, :3]
-            else:
-                global_axis_angle = theta[:, 0]
-            global_orient_action = self.template.get_rot_action(global_axis_angle)  # B,4,4
-            add_A = torch.einsum("bij, bnjk -> bnik", global_orient_action, add_A)
-
-            if self.w_memory_type == "point":
-                assert self._w_correction_rest.shape[-1] > 0
-                add_W = self._w_correction_rest[None].expand(B, -1, -1)
-            elif self.w_memory_type == "voxel":
-                add_W = W[..., self.num_bones :]
-
-            add_T = torch.einsum("bnj, bjrc -> bnrc", add_W, add_A)
-            T = T + add_T  # Linear
-            additional_dict["As"] = add_A
-
         R, t = T[:, :, :3, :3], T[:, :, :3, 3]  # B,N,3,3; B,N,3
 
         mu = torch.einsum("bnij,bnj->bni", R, mu_can) + t  # B,N,3
@@ -885,51 +759,8 @@ class GaussianTemplateModel(nn.Module):
         )
         self.max_radii2D = torch.as_tensor(ckpt["max_radii2D"], dtype=torch.float32)
 
-        # * add bones may have different total_t
-        if "add_bones.dt_list" in ckpt.keys():
-            self.add_bones.total_t = ckpt["add_bones.dt_list"].shape[0]
-            self.add_bones.dt_list = nn.Parameter(
-                torch.as_tensor(ckpt["add_bones.dt_list"], dtype=torch.float32)
-            )
-            self.add_bones.dr_list = nn.Parameter(
-                torch.as_tensor(ckpt["add_bones.dr_list"], dtype=torch.float32)
-            )
         # load others
         self.load_state_dict(ckpt, strict=True)
         # this is critical, reinit the funcs
         self._init_act(self.max_scale, self.min_scale)
         return
-
-
-if __name__ == "__main__":
-    import os.path as osp
-    from templates import get_template
-
-    # model = GaussianTemplateModelGridX(mode="dog").cuda()
-    # theta = torch.zeros(2, 35 * 3 + 7).cuda()
-    # trans = torch.zeros(2, 3).cuda()
-
-    template = get_template(
-        mode="human",
-        template_model_path="../../data/smpl_model/SMPL_NEUTRAL.pkl",
-        init_beta=None,
-        cano_pose_type="t_pose",
-        voxel_deformer_res=64,
-    )
-
-    add_bones = AdditionalBones(
-        num_bones=16,
-        total_t=100,  # any usage of time should use this!
-        mode="pose-mlp",
-    )
-
-    model = GaussianTemplateModel(
-        template=template, add_bones=add_bones, w_correction_flag=True
-    ).cuda()
-
-    theta = torch.zeros(2, 24, 3).cuda()
-    trans = torch.zeros(2, 3).cuda()
-
-    ret = model(theta, trans, {"t": 0})
-    print(ret)
-    print("Done")

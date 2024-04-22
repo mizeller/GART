@@ -2,25 +2,13 @@
 # ! Warning, must use the pre-processed People Snapshot!!
 
 from torch.utils.data import Dataset
-import logging
-import json
-import os
 import numpy as np
-from os.path import join
 import os.path as osp
-import pickle
-import numpy as np
-import torch.utils.data as data
-from PIL import Image
 import imageio
 import cv2
-from plyfile import PlyData
-from tqdm import tqdm
-from transforms3d.euler import euler2mat
 from transforms3d.axangles import mat2axangle, axangle2mat
-from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
+from pytorch3d.transforms import axis_angle_to_matrix
 import torch
-import glob
 import sys
 
 sys.path.append(osp.dirname(osp.abspath(__file__)))
@@ -28,17 +16,10 @@ sys.path.append(osp.dirname(osp.abspath(__file__)))
 from smplx.smplx import SMPLLayer
 
 META = {
-    "my_377": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-    "my_386": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-    "my_387": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-    # "my_390": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-    # ! 390 is not used for testing
     "my_392": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-    "my_393": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-    "my_394": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
 }
 
-# This is the sampler they used for testing, fro seq 377, the actual dataset len is 2200, but after their dataloader, they only use 374 frames!!
+# This is the sampler they used for testing, for seq 377, the actual dataset len is 2200, but after their dataloader, they only use 374 frames!!
 from torch.utils.data.sampler import Sampler
 
 
@@ -78,7 +59,7 @@ class Dataset(Dataset):
         image_zoom_ratio=0.5,  # 0.5,  # instant-nvr use 0.5 for both train and test
         # for cfg input from instant-nvr
         # for zju mocap instant-nvr use test_view: []; training_view: [4]
-        training_view=[4], #[0,4,8,12,16,20], #[4],  # [4],  # 4
+        training_view=[4],
         num_eval_frame=-1,
         test_novel_pose=False,
         # my cfg
@@ -93,13 +74,8 @@ class Dataset(Dataset):
 
         root = osp.join(data_root, video_name)
 
-        # anno_fn = osp.join(root, "annots_old.npy") # ! debug
         anno_fn = osp.join(root, "annots.npy")
         annots = np.load(anno_fn, allow_pickle=True).item()
-
-        # old_anno_fn = osp.join(root, "annots_old.npy") # ! debug
-        # old_annots = np.load(old_anno_fn, allow_pickle=True).item()
-
         self.cams = annots["cams"]
 
         # ! Check the run.py in instant-nvr evaluation
@@ -115,14 +91,12 @@ class Dataset(Dataset):
             self.view = test_view
         elif split == "val":
             self.view = test_view[::4]
-            # self.view = test_view
 
         i = META[self.video_name]["begin_ith_frame"]
         i_intv = META[self.video_name]["frame_interval"]
         self.f_intv = i_intv
         ni = META[self.video_name]["num_train_frame"]
         if split == "val":
-            # * Seems the
             self.view = [5]
             self.tick = 0
             ni = 500
@@ -148,26 +122,6 @@ class Dataset(Dataset):
         ).ravel()
         self.num_cams = len(self.view)
 
-        # Use camera extrinsic to rotate the simple to each camera coordinate frame!
-
-        # the R,t is used like this, stored in cam
-        # i.e. the T stored in cam is actually p_c = T_cw @ p_w
-        # def get_rays(H, W, K, R, T):
-        #     # calculate the camera origin
-        #     rays_o = -np.dot(R.T, T).ravel()
-        #     # calculate the world coodinates of pixels
-        #     i, j = np.meshgrid(
-        #         np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy"
-        #     )
-        #     xy1 = np.stack([i, j, np.ones_like(i)], axis=2)
-        #     pixel_camera = np.dot(xy1, np.linalg.inv(K).T)
-        #     pixel_world = np.dot(pixel_camera - T.ravel(), R)
-        #     # calculate the ray direction
-        #     rays_d = pixel_world - rays_o[None, None]
-        #     rays_d = rays_d / np.linalg.norm(rays_d, axis=2, keepdims=True)
-        #     rays_o = np.broadcast_to(rays_o, rays_d.shape)
-        #     return rays_o, rays_d
-
         # ! the cams R is in a very low precision, have use SVD to project back to SO(3)
         for cid in range(num_cams):
             _R = self.cams["R"][cid]
@@ -176,7 +130,9 @@ class Dataset(Dataset):
             self.cams["R"][cid] = new_R
 
         # this is copied
-        smpl_layer = SMPLLayer(osp.join(osp.dirname(__file__), "../data/smpl-meta/SMPL_NEUTRAL.pkl"))
+        smpl_layer = SMPLLayer(
+            osp.join(osp.dirname(__file__), "../data/smpl-meta/SMPL_NEUTRAL.pkl")
+        )
 
         # * Load smpl to camera frame
         self.smpl_theta_list, self.smpl_trans_list, smpl_beta_list = [], [], []
@@ -254,7 +210,9 @@ class Dataset(Dataset):
                 )
                 np.savetxt("../debug/smpl_vtx_cam2.xyz", smpl_vtx_human2, fmt="%.6f")
 
-                smpl_vtx_human = smpl_layer(torch.from_numpy(beta)[None], body_pose=_pose[:, 1:])
+                smpl_vtx_human = smpl_layer(
+                    torch.from_numpy(beta)[None], body_pose=_pose[:, 1:]
+                )
                 smpl_vtx_human = smpl_vtx_human.vertices[0].numpy()
                 np.savetxt("../debug/smpl_vtx_human.xyz", smpl_vtx_human, fmt="%.6f")
                 smpl_vtx_world = np.dot(smpl_vtx_human, T_wh[:3, :3].T) + T_wh[:3, 3]
@@ -292,9 +250,9 @@ class Dataset(Dataset):
         return len(self.ims)
 
     def __getitem__(self, index):
-        img_path = os.path.join(self.data_root, self.video_name, self.ims[index])
+        img_path = osp.join(self.data_root, self.video_name, self.ims[index])
         img = imageio.imread(img_path).astype(np.float32) / 255.0
-        mask_path = os.path.join(
+        mask_path = osp.join(
             self.data_root,
             self.video_name,
             self.ims[index].replace("images", "mask").replace(".jpg", ".png"),
@@ -309,7 +267,9 @@ class Dataset(Dataset):
         img = cv2.undistort(img, K, D)
         msk = cv2.undistort(msk, K, D)
 
-        H, W = int(img.shape[0] * self.image_zoom_ratio), int(img.shape[1] * self.image_zoom_ratio)
+        H, W = int(img.shape[0] * self.image_zoom_ratio), int(
+            img.shape[1] * self.image_zoom_ratio
+        )
         img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
         msk = cv2.resize(msk, (W, H), interpolation=cv2.INTER_NEAREST)
         K[:2] = K[:2] * self.image_zoom_ratio

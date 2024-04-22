@@ -1,39 +1,76 @@
+from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
+from torch.utils.tensorboard import SummaryWriter
+from transforms3d.euler import euler2mat
+import os, os.path as osp, shutil
 from matplotlib import pyplot as plt
-from pytorch3d.transforms import matrix_to_axis_angle
-import imageio
-import torch
+from omegaconf import OmegaConf
 from tqdm import tqdm
 import numpy as np
-import os, os.path as osp, shutil, sys
-from transforms3d.euler import euler2mat
-from omegaconf import OmegaConf
+import imageio
+import torch
 
-from lib_data.get_data import prepare_real_seq
-from lib_data.data_provider import DatabasePoseProvider
-
-from lib_gart.templates import get_template
-from lib_gart.model import GaussianTemplateModel, AdditionalBones
-
-from lib_gart.optim_utils import *
-from lib_render.gauspl_renderer import render_cam_pcl
-
+from lib_gart.model import GaussianTemplateModel
 from lib_gart.model_utils import transform_mu_frame
 
-from utils.misc import *
-from utils.viz import viz_render
-
-from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
-import time
+from lib_gart.optim_utils import *
 
 from lib_guidance.camera_sampling import sample_camera, fov2K, opencv2blender
-import logging
+from lib_render.gauspl_renderer import render_cam_pcl
 
-from viz_utils import viz_spinning, viz_human_all, viz_dog_all
+from utils.viz import viz_render
 from utils.ssim import ssim
 
-import argparse
 from datetime import datetime
-from test_utils import test
+from utils.misc import seed_everything, HostnameFilter, get_bbox
+
+import logging
+import time
+
+from viz_utils import viz_spinning
+
+
+def create_log(log_dir, name, debug=False):
+    os.makedirs(osp.join(log_dir, "viz_step"), exist_ok=True)
+    if debug:  # skip backup when debugging
+        backup_dir = osp.join(log_dir, "backup")
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copyfile(__file__, osp.join(backup_dir, osp.basename(__file__)))
+        # shutil.copytree("lib_gart", osp.join(backup_dir, "lib_gart"), dirs_exist_ok=Tru
+        # backup all notebooks
+        os.system(f"cp ./*.ipynb {backup_dir}/")
+
+    writer = SummaryWriter(log_dir=log_dir)
+    # also set the logging to print to terminal and the file
+    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    _configure_logging(
+        osp.join(log_dir, f"{current_datetime}.log"), debug=debug, name=name
+    )
+    return writer
+
+
+def _configure_logging(log_path, debug=False, name="default"):
+    """
+    https://github.com/facebookresearch/DeepSDF
+    """
+    logging.getLogger().handlers.clear()
+    logger = logging.getLogger()
+    if debug:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+    logger_handler = logging.StreamHandler()
+    logger_handler.addFilter(HostnameFilter())
+    formatter = logging.Formatter(
+        "| %(hostname)s | %(levelname)s | %(asctime)s | %(message)s   [%(filename)s:%(lineno)d]",
+        "%b-%d-%H:%M:%S",
+    )
+    logger_handler.setFormatter(formatter)
+    logger.addHandler(logger_handler)
+
+    file_logger_handler = logging.FileHandler(log_path)
+
+    file_logger_handler.setFormatter(formatter)
+    logger.addHandler(file_logger_handler)
 
 
 class TGFitter:
@@ -41,118 +78,40 @@ class TGFitter:
         self,
         log_dir,
         profile_fn,
-        mode,
-        template_model_path="data/smpl_model/SMPL_NEUTRAL.pkl",
         device=torch.device("cuda:0"),
-        **kwargs,
-    ) -> None:
+        debug: bool = True,
+    ):
         self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
 
         self.profile_fn = profile_fn
-        try:
-            shutil.copy(profile_fn, osp.join(self.log_dir, osp.basename(profile_fn))) # copy the config .yaml file to the log directory
-        except:
-            pass
-
-        self.mode = mode
-        assert self.mode in ["human", "dog"], "Only support human and dog for now" # TODO: theoretically, just add a hand here...
-
-        self.template_model_path = template_model_path
+        shutil.copy(profile_fn, osp.join(self.log_dir, osp.basename(profile_fn)))
+        self.mode = "human"
         self.device = device
 
-        # * auto set attr
-        cfg = OmegaConf.load(profile_fn)
-        # assign the cfg to self attribute
-        for k, v in cfg.items():
+        # assign vars in zju_3m.yaml to self attrs
+        for k, v in OmegaConf.load(profile_fn).items():
             setattr(self, k, v)
-
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
-        # * explicitly set flags (iff they don't exist)
-        self.FAST_TRAINING = getattr(self, "FAST_TRAINING", False)
-        self.LAMBDA_SSIM = getattr(self, "LAMBDA_SSIM", 0.0)
-       
-        self.LAMBDA_LPIPS = getattr(self, "LAMBDA_LPIPS", 0.0)
-        if self.LAMBDA_LPIPS > 0:
-            from utils.lpips import LPIPS
-
-            self.lpips = LPIPS(net="vgg").to(self.device)
-            for param in self.lpips.parameters():
-                param.requires_grad = False
-
-        # if isinstance(self.RESET_OPACITY_STEPS, int):
-        #     self.RESET_OPACITY_STEPS = [
-        #         i
-        #         for i in range(1, self.TOTAL_steps)
-        #         if i % self.RESET_OPACITY_STEPS == 0
-        #     ]
-        # if isinstance(self.REGAUSSIAN_STEPS, int):
-        #     self.REGAUSSIAN_STEPS = [
-        #         i for i in range(1, self.TOTAL_steps) if i % self.REGAUSSIAN_STEPS == 0
-        #     ]
 
         # prepare base R
-        if self.mode == "human":
-            viz_base_R_opencv = np.asarray(euler2mat(np.pi, 0, 0, "sxyz"))
-        else:
-            viz_base_R_opencv = np.asarray(euler2mat(np.pi / 2.0, 0, np.pi, "rxyz"))
-        viz_base_R_opencv = torch.from_numpy(viz_base_R_opencv).float()
-        self.viz_base_R = viz_base_R_opencv.to(self.device)
+        self.viz_base_R = (
+            torch.from_numpy(np.asarray(euler2mat(np.pi, 0, 0, "sxyz")))
+            .float()
+            .to(self.device)
+        )
 
-        if self.mode == "human":
-            self.reg_base_R_global = (
-                matrix_to_axis_angle(
-                    torch.as_tensor(euler2mat(np.pi / 2.0, 0, np.pi / 2.0, "sxyz"))[
-                        None
-                    ]
-                )[0]
-                .float()
-                .to(self.device)
-            )
-        else:
-            # TODO, for generation of dog
-            pass
+        self.reg_base_R_global = (
+            matrix_to_axis_angle(
+                torch.as_tensor(euler2mat(np.pi / 2.0, 0, np.pi / 2.0, "sxyz"))[None]
+            )[0]
+            .float()
+            .to(self.device)
+        )
 
-        self.writer = create_log(
-            self.log_dir, name=osp.basename(self.profile_fn).split(".")[0], debug=False
+        self.writer: SummaryWriter = create_log(
+            self.log_dir, name=osp.basename(self.profile_fn).split(".")[0], debug=debug
         )
         return
-
-    def prepare_fake_data(self, mode, *args, **kwargs):
-        if mode == "amass":
-            # todo: change to amass
-            provider = DatabasePoseProvider(*args, **kwargs, device=torch.device("cpu"))
-            return provider
-        return provider
-
-    def prepare_real_seq(
-        self,
-        seq_name,
-        dataset_mode,
-        split,
-        ins_avt_wild_start_end_skip=None,
-        image_zoom_ratio=0.5,
-        data_stay_gpu_flag=True,
-    ):
-        provider, dataset = prepare_real_seq(
-            seq_name=seq_name,
-            dataset_mode=dataset_mode,
-            split=split,
-            ins_avt_wild_start_end_skip=ins_avt_wild_start_end_skip,
-            image_zoom_ratio=getattr(
-                self, "IMAGE_ZOOM_RATIO", image_zoom_ratio
-            ),  # ! this overwrite the func arg
-            balance=getattr(self, "VIEW_BALANCE_FLAG", False),
-        )
-        provider.to(self.device)
-        if getattr(self, "DATA_STAY_GPU_FLAG", data_stay_gpu_flag):
-            provider.move_images_to_device(self.device)
-        provider.viz_selection_prob(
-            osp.join(self.log_dir, f"split_{split}_view_prob.png")
-        )
-        return provider, dataset
 
     def load_saved_model(self, ckpt_path=None):
         if ckpt_path is None:
@@ -167,33 +126,13 @@ class TGFitter:
         model.summary()
         return model
 
-    def _get_model_optimizer(self, betas, add_bones_total_t=0):
+    def _get_model_optimizer(self, betas):
         seed_everything(self.SEED)
-
-        template = get_template(
-            mode=self.mode,
-            template_model_path=self.template_model_path,
-            init_beta=betas,
-            cano_pose_type=getattr(self, "CANO_POSE_TYPE", "t_pose"),
-            voxel_deformer_res=getattr(self, "VOXEL_DEFORMER_RES", 64),
-        )
-
-        add_bones = AdditionalBones(
-            num_bones=getattr(self, "W_REST_DIM", 0),
-            mode=getattr(self, "W_REST_MODE", "pose-mlp"),
-            total_t=add_bones_total_t,
-            # pose mlp
-            mlp_hidden_dims=getattr(
-                self, "ADD_BONES_MLP_HIDDEN_DIMS", [256, 256, 256, 256]
-            ),
-            pose_dim=23 * 3 if self.mode == "human" else 34 * 3 + 7,
-        )
-
         model = GaussianTemplateModel(
-            template=template,
-            add_bones=add_bones,
+            template=None,
+            betas=betas,
             w_correction_flag=getattr(self, "W_CORRECTION_FLAG", False),
-            # w_rest_dim=getattr(self, "W_REST_DIM", 0),
+            w_rest_dim=getattr(self, "W_REST_DIM", 0),
             f_localcode_dim=getattr(self, "F_LOCALCODE_DIM", 0),
             max_sph_order=getattr(self, "MAX_SPH_ORDER", 0),
             w_memory_type=getattr(self, "W_MEMORY_TYPE", "point"),
@@ -275,10 +214,7 @@ class TGFitter:
             sph_rest_scheduler_func,
         )
 
-    def _get_pose_optimizer(self, data_provider, add_bones):
-        if data_provider is None and add_bones.num_bones == 0:
-            # dummy one
-            return torch.optim.Adam(params=[torch.zeros(1, requires_grad=True)]), {}
+    def _get_pose_optimizer(self, data_provider):
 
         # * prepare pose optimizer list and the schedulers
         scheduler_dict, pose_optim_l = {}, []
@@ -325,15 +261,6 @@ class TGFitter:
                 lr_final=getattr(self, "POSE_T_LR_FINAL", self.POSE_T_LR),
                 lr_delay_mult=0.01,  # 0.02
             )
-        if add_bones.num_bones > 0:
-            # have additional bones
-            pose_optim_l.append(
-                {
-                    "params": add_bones.parameters(),
-                    "lr": getattr(self, "LR_W_REST_BONES", 0.0),
-                    "name": "add_bones",
-                }
-            )
 
         pose_optim_mode = getattr(self, "POSE_OPTIM_MODE", "adam")
         if pose_optim_mode == "adam":
@@ -343,14 +270,6 @@ class TGFitter:
         else:
             raise NotImplementedError(f"Unknown pose optimizer mode {pose_optim_mode}")
         return optimizer_smpl, scheduler_dict
-
-    def is_pose_step(self, step):
-        flag = (
-            step >= self.POSE_START_STEP
-            and step <= self.POSE_END_STEP
-            and step % self.POSE_STEP_INTERVAL == 0
-        )
-        return flag
 
     def _guide_step(
         self,
@@ -522,9 +441,9 @@ class TGFitter:
                 relative_radius=True,
                 fovy_range=[15, 60],
                 zoom_range=[1.0, 1.0],
-                random_azimuth_range=[-180.0 - 30, 0 + 30]
-                if joint_id == 23
-                else [0 - 30, 180 + 30],
+                random_azimuth_range=(
+                    [-180.0 - 30, 0 + 30] if joint_id == 23 else [0 - 30, 180 + 30]
+                ),
             )
             T_ocam[:, :3, -1] += head_xyz[None].to(T_ocam.device)
             T_ocam = T_ocam.to(self.device).float()
@@ -551,7 +470,6 @@ class TGFitter:
         opa_th=-1,
         use_box_crop_pad=-1,
         default_bg=[1.0, 1.0, 1.0],
-        add_bones_As=None,
     ):
         gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = data_pack
         gt_rgb = gt_rgb.clone()
@@ -559,8 +477,7 @@ class TGFitter:
         pose = torch.cat([pose_base, pose_rest], dim=1)
         H, W = gt_rgb.shape[1:3]
         additional_dict = {"t": time_index}
-        if add_bones_As is not None:
-            additional_dict["As"] = add_bones_As
+
         mu, fr, sc, op, sph, additional_ret = model(
             pose,
             global_trans,
@@ -593,14 +510,6 @@ class TGFitter:
                 render_pkg["rgb"][:, bg_mask] = (
                     render_pkg["rgb"][:, bg_mask] * 0.0 + default_bg[0]
                 )
-
-            # * lpips before the pad
-            if self.LAMBDA_LPIPS > 0:
-                _loss_lpips = self.lpips(
-                    render_pkg["rgb"][None],
-                    gt_rgb.permute(0, 3, 1, 2),
-                )
-                loss_lpips = loss_lpips + _loss_lpips
 
             if use_box_crop_pad > 0:
                 # pad the gt mask and crop the image, for a large image with a small fg object
@@ -671,29 +580,36 @@ class TGFitter:
             max_s_sq,
         ) = model.compute_reg(K)
 
-        lambda_std_q = getattr(self, "LAMBDA_STD_Q", 0.0)
-        lambda_std_s = getattr(self, "LAMBDA_STD_S", 0.0)
-        lambda_std_o = getattr(self, "LAMBDA_STD_O", 0.0)
-        lambda_std_cd = getattr(self, "LAMBDA_STD_CD", 0.0)
-        lambda_std_ch = getattr(self, "LAMBDA_STD_CH", lambda_std_cd)
-        lambda_std_w = getattr(self, "LAMBDA_STD_W", 0.3)
-        lambda_std_w_rest = getattr(self, "LAMBDA_STD_W_REST", lambda_std_w)
-        lambda_std_f = getattr(self, "LAMBDA_STD_F", lambda_std_w)
+        lambda_std_q = getattr(self, "LAMBDA_STD_Q", 0.0)  # zju_3m.yaml -> 0.01
+        lambda_std_s = getattr(self, "LAMBDA_STD_S", 0.0)  # zju_3m.yaml -> 0.01
+        lambda_std_o = getattr(self, "LAMBDA_STD_O", 0.0)  # zju_3m.yaml -> 0.01
+        lambda_std_cd = getattr(self, "LAMBDA_STD_CD", 0.0)  # zju_3m.yaml -> 0.01
+        lambda_std_ch = getattr(
+            self, "LAMBDA_STD_CH", lambda_std_cd
+        )  # zju_3m.yaml -> 0.01
+        lambda_std_w = getattr(self, "LAMBDA_STD_W", 0.3)  # zju_3m.yaml -> 0.3
+        lambda_std_w_rest = getattr(
+            self, "LAMBDA_STD_W_REST", lambda_std_w
+        )  # zju_3m.yaml -> 0.5
+        lambda_small_scale = getattr(
+            self, "LAMBDA_SMALL_SCALE", 0.0
+        )  # zju_3m.yaml -> 0.01
+        lambda_w_norm = getattr(self, "LAMBDA_W_NORM", 0.1)  # zju_3m.yaml -> 0.01
+        lambda_w_rest_norm = getattr(
+            self, "LAMBDA_W_REST_NORM", lambda_w_norm
+        )  # zju_3m.yaml -> 0.01
 
-        lambda_w_norm = getattr(self, "LAMBDA_W_NORM", 0.1)
-        lambda_w_rest_norm = getattr(self, "LAMBDA_W_REST_NORM", lambda_w_norm)
+        lambda_std_f = getattr(self, "LAMBDA_STD_F", lambda_std_w)  # not in zju_3m.yaml
+        lambda_knn_dist = getattr(self, "LAMBDA_KNN_DIST", 0.0)  # not in zju_3m.yaml
 
-        lambda_knn_dist = getattr(self, "LAMBDA_KNN_DIST", 0.0)
-
-        lambda_small_scale = getattr(self, "LAMBDA_SMALL_SCALE", 0.0)
-
+        # regression loss L_reg
         reg_loss = (
             lambda_std_q * q_std
             + lambda_std_s * s_std
             + lambda_std_o * o_std
             + lambda_std_cd * cd_std
             + lambda_std_ch * ch_std
-            + lambda_knn_dist * dist_sq
+            + lambda_knn_dist * dist_sq  # 0.0
             + lambda_std_w * w_std
             + lambda_std_w_rest * w_rest_std
             + lambda_std_f * f_std
@@ -746,27 +662,12 @@ class TGFitter:
 
     def run(
         self,
-        real_data_provider=None,
-        fake_data_provider=None,
-        test_every_n_step=-1,
-        test_dataset=None,
-        guidance=None,
+        data_provider=None,
     ):
         torch.cuda.empty_cache()
 
-        # * init the model
-        real_flag = real_data_provider is not None
-        fake_flag = fake_data_provider is not None
-        assert real_flag or fake_flag
+        init_beta = data_provider.betas
 
-        if real_flag:
-            init_beta = real_data_provider.betas
-            total_t = real_data_provider.total_t
-        else:
-            init_beta = np.zeros(10)
-            total_t = None
-            assert guidance is not None
-            # self.amp_scaler = torch.cuda.amp.GradScaler()
         (
             model,
             optimizer,
@@ -775,11 +676,9 @@ class TGFitter:
             w_rest_scheduler_func,
             sph_scheduler_func,
             sph_rest_scheduler_func,
-        ) = self._get_model_optimizer(betas=init_beta, add_bones_total_t=total_t)
+        ) = self._get_model_optimizer(betas=init_beta)
 
-        optimizer_pose, scheduler_pose = self._get_pose_optimizer(
-            real_data_provider, model.add_bones
-        )
+        optimizer_pose, scheduler_pose = self._get_pose_optimizer(data_provider)
 
         # * Optimization Loop
         stat_n_list = []
@@ -810,59 +709,34 @@ class TGFitter:
             optimizer.zero_grad(), optimizer_pose.zero_grad()
 
             loss = 0.0
-            if real_flag:
-                real_data_pack = real_data_provider(
-                    self.N_POSES_PER_STEP, continuous=False
-                )
-                (
-                    loss_recon,
-                    loss_mask,
-                    render_list,
-                    gt_rgb,
-                    gt_mask,
-                    model_ret,
-                    loss_dict,
-                ) = self._fit_step(
-                    model,
-                    data_pack=real_data_pack,
-                    act_sph_ord=active_sph_order,
-                    random_bg=self.RAND_BG_FLAG,
-                    use_box_crop_pad=getattr(self, "BOX_CROP_PAD", -1),
-                    default_bg=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
-                )
-                loss = loss + loss_recon
-                for k, v in loss_dict.items():
-                    self.add_scalar(k, v.detach(), step)
-            else:
-                render_list = []
-            if fake_flag:
-                # do SD guidance enhancement
-                fake_data_pack = fake_data_provider(self.N_POSES_PER_GUIDE_STEP)
-                # * get step ratio
-                sd_step_ratio = self.get_sd_step_ratio(step)
-                guidance_scale = self.get_guidance_scale(step)
 
-                loss_guidance, guide_rendered_list = self._guide_step(
-                    model,
-                    fake_data_pack,
-                    active_sph_order,
-                    guidance,
-                    step_ratio=sd_step_ratio,
-                    guidance_scale=guidance_scale,
-                    head_prob=getattr(self, "HEAD_PROB", 0.3),
-                    can_prob=getattr(self, "CAN_PROB", 0.0),
-                    hand_prob=getattr(self, "HAND_PROB", 0.0),
-                )
-                lambda_guidance = getattr(self, "LAMBDA_GUIDANCE", 1.0)
-                loss = loss + lambda_guidance * loss_guidance
-                self.add_scalar("loss_guide", loss_guidance.detach(), step)
-                render_list = render_list + guide_rendered_list
+            real_data_pack = data_provider(self.N_POSES_PER_STEP, continuous=False)
+
+            (
+                loss_recon,
+                loss_mask,
+                render_list,
+                gt_rgb,
+                gt_mask,
+                model_ret,
+                loss_dict,
+            ) = self._fit_step(
+                model,
+                data_pack=real_data_pack,
+                act_sph_ord=active_sph_order,
+                random_bg=self.RAND_BG_FLAG,
+                use_box_crop_pad=getattr(self, "BOX_CROP_PAD", -1),
+                default_bg=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+            )
+            loss = loss + loss_recon
+            for k, v in loss_dict.items():
+                self.add_scalar(k, v.detach(), step)
 
             if (
                 last_reset_step < 0
                 or step - last_reset_step > self.MASK_LOSS_PAUSE_AFTER_RESET
                 and step > getattr(self, "MASK_START_STEP", 0)
-            ) and real_flag:
+            ):
                 loss = loss + self.LAMBDA_MASK * loss_mask
                 self.add_scalar("loss_mask", loss_mask.detach(), step)
             self.add_scalar("loss", loss.detach(), step)
@@ -934,40 +808,32 @@ class TGFitter:
 
             # * Viz
             if (step + 1) % getattr(self, "VIZ_INTERVAL", 100) == 0 or step == 0:
-                if real_flag:
-                    mu, fr, s, o, sph = model_ret[:5]
-                    save_path = f"{self.log_dir}/viz_step/step_{step}.png"
-                    viz_render(
-                        gt_rgb[0], gt_mask[0], render_list[0], save_path=save_path
-                    )
-                    # viz the spinning in the middle
-                    (
-                        _,
-                        _,
-                        K,
-                        pose_base,
-                        pose_rest,
-                        global_trans,
-                        time_index,
-                    ) = real_data_pack
-                    viz_spinning(
-                        model,
-                        torch.cat([pose_base, pose_rest], 1)[:1],
-                        global_trans[:1],
-                        real_data_provider.H,
-                        real_data_provider.W,
-                        K[0],
-                        save_path=f"{self.log_dir}/viz_step/spinning_{step}.gif",
-                        time_index=time_index,
-                        active_sph_order=active_sph_order,
-                        # bg_color=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
-                        bg_color=[1.0, 1.0, 1.0],
-                    )
-                if fake_flag:
-                    viz_rgb = [it["rgb"].permute(1, 2, 0) for it in guide_rendered_list]
-                    viz_rgb = torch.cat(viz_rgb, dim=1).detach().cpu().numpy()
-                    viz_rgb = (np.clip(viz_rgb, 0.0, 1.0) * 255).astype(np.uint8)
-                    imageio.imsave(f"{self.log_dir}/viz_step/guide_{step}.png", viz_rgb)
+                mu, fr, s, o, sph = model_ret[:5]
+                save_path = f"{self.log_dir}/viz_step/step_{step}.png"
+                viz_render(gt_rgb[0], gt_mask[0], render_list[0], save_path=save_path)
+                # viz the spinning in the middle
+                (
+                    _,
+                    _,
+                    K,
+                    pose_base,
+                    pose_rest,
+                    global_trans,
+                    time_index,
+                ) = real_data_pack
+                viz_spinning(
+                    model,
+                    torch.cat([pose_base, pose_rest], 1)[:1],
+                    global_trans[:1],
+                    data_provider.H,
+                    data_provider.W,
+                    K[0],
+                    save_path=f"{self.log_dir}/viz_step/spinning_{step}.gif",
+                    time_index=time_index,
+                    active_sph_order=active_sph_order,
+                    # bg_color=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+                    bg_color=[1.0, 1.0, 1.0],
+                )
 
                 can_pose = model.template.canonical_pose.detach()
                 if self.mode == "human":
@@ -1016,29 +882,18 @@ class TGFitter:
                 plt.savefig(f"{self.log_dir}/viz_step/o_hist_step_{step}.png")
                 plt.close()
 
-            # * test
-            if test_every_n_step > 0 and (
-                (step + 1) % test_every_n_step == 0 or step == self.TOTAL_steps - 1
-            ):
-                logging.info("Testing...")
-                self._eval_save_error_map(model, test_dataset, f"test_{step}")
-                test_results = self.eval_dir(f"test_{step}")
-                for k, v in test_results.items():
-                    self.add_scalar(f"test_{k}", v, step)
-
         running_end_t = time.time()
         logging.info(
             f"Training time: {(running_end_t - running_start_t):.3f} seconds i.e. {(running_end_t - running_start_t)/60.0 :.3f} minutes"
         )
 
         # * save
-        logging.info("Saving model...")
         model.eval()
         ckpt_path = f"{self.log_dir}/model.pth"
+        logging.info(f"Saving model to {ckpt_path}...")
         torch.save(model.state_dict(), ckpt_path)
-        if real_flag:
-            pose_path = f"{self.log_dir}/training_poses.pth"
-            torch.save(real_data_provider.state_dict(), pose_path)
+        pose_path = f"{self.log_dir}/training_poses.pth"
+        torch.save(data_provider.state_dict(), pose_path)
         model.to("cpu")
 
         # * stat
@@ -1049,7 +904,7 @@ class TGFitter:
         plt.close()
 
         model.summary()
-        return model, real_data_provider
+        return model, data_provider
 
     def testtime_pose_optimization(
         self,
@@ -1064,8 +919,6 @@ class TGFitter:
         decay_factor=0.5,
         check_every_n_step=5,
         viz_fn=None,
-        As=None,
-        pose_As_lr=1e-3,
     ):
         # * Like Instant avatar, optimize the smpl pose f
         # * will optimize all poses in the data_pack
@@ -1087,10 +940,6 @@ class TGFitter:
             {"params": [pose_r], "lr": pose_rest_lr},
             {"params": [trans], "lr": trans_lr},
         ]
-        if As is not None:
-            As = As.detach().clone()
-            As.requires_grad_(True)
-            optim_l.append({"params": [As], "lr": pose_As_lr})
         optimizer_smpl = torch.optim.SGD(optim_l)
 
         scheduler = torch.optim.lr_scheduler.StepLR(
@@ -1108,7 +957,6 @@ class TGFitter:
                 act_sph_ord=model.max_sph_order,
                 random_bg=False,
                 default_bg=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
-                add_bones_As=As,
             )
             loss = loss_recon
             loss.backward()
@@ -1156,13 +1004,10 @@ class TGFitter:
             plt.savefig(viz_fn)
             plt.close()
 
-        if As is not None:
-            As.detach().clone()
         return (
             pose_b.detach().clone(),
             pose_r.detach().clone(),
             trans.detach().clone(),
-            As,
         )
 
     @torch.no_grad()
@@ -1178,7 +1023,6 @@ class TGFitter:
         sph_o = model.max_sph_order
         logging.info(f"FPS eval using active_sph_order: {sph_o}")
         # run one iteration to check the output correctness
-
         mu, fr, sc, op, sph, additional_ret = model(
             pose[0:1],
             global_trans[0:1],
@@ -1216,181 +1060,3 @@ class TGFitter:
         with open(osp.join(self.log_dir, "fps.txt"), "w") as f:
             f.write(f"FPS: {fps}")
         return fps
-
-
-def tg_fitting_eval(solver, dataset_mode, seq_name, optimized_seq):
-    if dataset_mode == "people_snapshot":
-        test(
-            solver,
-            seq_name=seq_name,
-            tto_flag=True,
-            tto_step=300,
-            tto_decay=70,
-            dataset_mode=dataset_mode,
-            pose_base_lr=3e-3,
-            pose_rest_lr=3e-3,
-            trans_lr=3e-3,
-            training_optimized_seq=optimized_seq,
-        )
-    elif dataset_mode == "zju":
-        test(
-            solver,
-            seq_name=seq_name,
-            tto_flag=True,
-            tto_step=50,
-            tto_decay=20,
-            dataset_mode=dataset_mode,
-            pose_base_lr=4e-3,
-            pose_rest_lr=4e-3,
-            trans_lr=4e-3,
-            training_optimized_seq=optimized_seq,
-        )
-    elif dataset_mode == "instant_avatar_wild":
-        test(
-            solver,
-            seq_name=seq_name,
-            tto_flag=True,
-            tto_step=50,
-            tto_decay=20,
-            dataset_mode=dataset_mode,
-            pose_base_lr=4e-3,
-            pose_rest_lr=4e-3,
-            trans_lr=4e-3,
-            training_optimized_seq=optimized_seq,
-        )
-    elif dataset_mode == "dog_demo":
-        test(
-            solver,
-            seq_name=seq_name,
-            tto_flag=True,
-            tto_step=160,
-            tto_decay=50,
-            dataset_mode=dataset_mode,
-            pose_base_lr=2e-2,
-            pose_rest_lr=2e-2,
-            trans_lr=2e-2,
-        )
-    else:
-        pass
-    # solver.eval_fps(solver.load_saved_model(), optimized_seq, rounds=10)
-    return
-
-
-if __name__ == "__main__":
-    args = argparse.ArgumentParser()
-    args.add_argument("--profile", type=str, default="./profiles/people/people_1m.yaml")
-    args.add_argument("--dataset", type=str, default="people_snapshot")
-    args.add_argument("--seq", type=str, default="male-3-casual")
-    args.add_argument("--logbase", type=str, default="debug")
-    # remove the viz during optimization
-    args.add_argument("--fast", action="store_true")
-    args.add_argument("--no_eval", action="store_true")
-    # for eval
-    args.add_argument("--eval_only", action="store_true")
-    args.add_argument("--log_dir", default="", type=str)
-    args.add_argument("--skip_eval_if_exsists", action="store_true")
-    # for viz
-    args.add_argument("--viz_only", action="store_true")
-    args = args.parse_args()
-
-    device = torch.device("cuda:0")
-    dataset_mode = args.dataset
-    seq_name = args.seq
-    profile_fn = args.profile
-    base_name = args.logbase
-
-    if len(args.log_dir) > 0:
-        log_dir = args.log_dir
-    else:
-        os.makedirs(f"./logs/{base_name}", exist_ok=True)
-        profile_name = osp.basename(profile_fn).split(".")[0]
-        log_dir = (
-            f"./logs/{base_name}/seq={seq_name}_prof={profile_name}_data={dataset_mode}"
-        )
-
-    # prepare
-    if dataset_mode == "zju":
-        smpl_path = "./data/smpl-meta/SMPL_NEUTRAL.pkl"
-        mode = "human"
-    elif dataset_mode == "people_snapshot":
-        mode = "human"
-        if seq_name.startswith("female"):
-            smpl_path = "./data/smpl_model/SMPL_FEMALE.pkl"
-        elif seq_name.startswith("male"):
-            smpl_path = "./data/smpl_model/SMPL_MALE.pkl"
-        else:
-            smpl_path = "./data/smpl_model/SMPL_NEUTRAL.pkl"
-    elif dataset_mode == "instant_avatar_wild":
-        mode = "human"
-        smpl_path = "./data/smpl_model/SMPL_NEUTRAL.pkl"
-    elif dataset_mode == "ubcfashion":
-        mode = "human"
-        smpl_path = "./data/smpl_model/SMPL_NEUTRAL.pkl"
-    elif dataset_mode == "dog_demo":
-        mode = "dog"
-        smpl_path = None
-    else:
-        raise NotImplementedError()
-
-    solver = TGFitter(
-        log_dir=log_dir,
-        profile_fn=profile_fn,
-        mode=mode,
-        template_model_path=smpl_path,
-        device=device,
-        FAST_TRAINING=args.fast,
-    )
-    data_provider, trainset = solver.prepare_real_seq(
-        seq_name,
-        dataset_mode,
-        split="train",
-        ins_avt_wild_start_end_skip=getattr(solver, "START_END_SKIP", None),
-    )
-
-    if args.eval_only:
-        assert len(args.log_dir) > 0, "Please specify the log_dir for eval only mode"
-        assert osp.exists(log_dir), f"{log_dir} not exists!"
-        logging.info(f"Eval only mode, load model from {log_dir}")
-        if args.skip_eval_if_exsists:
-            test_dir = osp.join(log_dir, "test")
-            if osp.exists(test_dir):
-                logging.info(f"Eval already exists, skip")
-                sys.exit(0)
-
-        data_provider.load_state_dict(
-            torch.load(osp.join(log_dir, "training_poses.pth")), strict=True
-        )
-        solver.eval_fps(solver.load_saved_model(), data_provider, rounds=10)
-        tg_fitting_eval(solver, dataset_mode, seq_name, data_provider)
-        logging.info("Done")
-        sys.exit(0)
-    elif args.viz_only:
-        assert len(args.log_dir) > 0, "Please specify the log_dir for eval only mode"
-        assert osp.exists(log_dir), f"{log_dir} not exists!"
-        data_provider.load_state_dict(
-            torch.load(osp.join(log_dir, "training_poses.pth")), strict=True
-        )
-        logging.info(f"Viz only mode, load model from {log_dir}")
-        if mode == "human":
-            viz_human_all(solver, data_provider, viz_name="viz_only")
-        elif mode == "dog":
-            viz_dog_all(solver, data_provider, viz_name="viz_only")
-        logging.info("Done")
-        sys.exit(0)
-
-    logging.info(f"Optimization with {profile_fn}")
-    _, optimized_seq = solver.run(data_provider)
-
-    if mode == "human":
-        viz_human_all(solver, optimized_seq)
-    elif mode == "dog":
-        viz_dog_all(solver, optimized_seq)
-
-    solver.eval_fps(solver.load_saved_model(), optimized_seq, rounds=10)
-    if args.no_eval:
-        logging.info("No eval, done!")
-        sys.exit(0)
-
-    tg_fitting_eval(solver, dataset_mode, seq_name, optimized_seq)
-
-    logging.info("done!")

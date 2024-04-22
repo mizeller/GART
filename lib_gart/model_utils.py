@@ -125,21 +125,6 @@ def get_predefined_human_rest_pose(pose_type):
     return body_pose_t.reshape(23, 3)
 
 
-def get_predefined_dog_rest_pose(pose_type):
-    if pose_type == "standing" or pose_type == "t_pose" or pose_type == "zero_pose":
-        pose = torch.zeros(34 * 3 + 7)
-    elif pose_type == "da_pose":
-        pose = torch.zeros(35, 3)
-        pose[7, 0] = np.pi / 8
-        pose[11, 0] = -np.pi / 8
-        pose[17, 0] = np.pi / 8
-        pose[21, 0] = -np.pi / 8
-        pose = torch.concatenate([pose[1:].reshape(-1), torch.zeros(7)], -1)
-    else:
-        raise NotImplementedError()
-    return pose  # 34*3+7
-
-
 def sample_pcl_from_gaussian(mu, frame, scale, k=6):
     # TODO: have to have a factor
     n = len(mu) * k

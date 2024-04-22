@@ -141,17 +141,6 @@ class VoxelDeformer(nn.Module):
         voxel_w_correction = torch.zeros_like(self.lbs_voxel_base)
         self.voxel_w_correction = nn.Parameter(voxel_w_correction)
 
-    def enable_additional_correction(self, additional_channels, std=1e-4):
-        additional_correction = (
-            torch.ones(
-                self.lbs_voxel_base.shape[0],
-                additional_channels,
-                *self.lbs_voxel_base.shape[2:]
-            )
-            * std
-        )
-        self.additional_correction = nn.Parameter(additional_correction)
-
     @property
     def get_voxel_weight(self):
         w = self.lbs_voxel_base
