@@ -13,27 +13,13 @@
         },
         {
             // NOTE: to run this debug config, the active file should be located in the code/ directory
-            "name": "debug gart // ubc template",
+            "name": "demo",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/solver.py",
+            "program": "${workspaceFolder}/demo.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}", // "${fileDirname}",
             "justMyCode": true,
-            "args": [
-                "--profile",
-                "./profiles/ubc/ubc_mlp.yaml",
-                "--dataset",
-                "instant_avatar_wild",
-                "--seq",
-                "ourpose_ubc_91+bCFG1jOS",
-                // "--logbase",
-                // "ubc_mlp",
-                "--log_dir",
-                "./logs/ubc_mlp/seq=ourpose_ubc_91+bCFG1jOS_prof=ubc_mlp_data=instant_avatar_wild",
-                "--fast",
-                "--no_eval"
-            ],
         },
     ]
 }
