@@ -111,8 +111,8 @@ def get_predefined_human_rest_pose(pose_type):
     print(f"Using predefined pose: {pose_type}")
     body_pose_t = torch.zeros((1, 69))
     if pose_type.lower() == "da_pose":
-        body_pose_t[:, 2] = torch.pi / 6
-        body_pose_t[:, 5] = -torch.pi / 6
+        body_pose_t[:, 2] = np.pi / 6
+        body_pose_t[:, 5] = -np.pi / 6
     elif pose_type.lower() == "a_pose":
         body_pose_t[:, 2] = 0.2
         body_pose_t[:, 5] = -0.2

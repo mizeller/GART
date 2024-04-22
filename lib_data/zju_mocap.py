@@ -73,7 +73,7 @@ class Dataset(Dataset):
     def __init__(
         self,
         data_root="data/zju-mocap",
-        video_name="my_377",
+        video_name="my_392",
         split="train",
         image_zoom_ratio=0.5,  # 0.5,  # instant-nvr use 0.5 for both train and test
         # for cfg input from instant-nvr

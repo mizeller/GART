@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from smplx.smplx import SMPLLayer
 from smplx.smplx.lbs import blend_shapes, vertices2joints, batch_rigid_transform
-from smal.smal_tpg import SMAL
+# from smal.smal_tpg import SMAL
 from voxel_deformer import VoxelDeformer
 
 from pytorch3d.transforms import (

@@ -1,0 +1,39 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            // NOTE: to run this debug config, the active file should be located in the code/ directory
+            "name": "debug gart // ubc template",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/solver.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}", // "${fileDirname}",
+            "justMyCode": true,
+            "args": [
+                "--profile",
+                "./profiles/ubc/ubc_mlp.yaml",
+                "--dataset",
+                "instant_avatar_wild",
+                "--seq",
+                "ourpose_ubc_91+bCFG1jOS",
+                // "--logbase",
+                // "ubc_mlp",
+                "--log_dir",
+                "./logs/ubc_mlp/seq=ourpose_ubc_91+bCFG1jOS_prof=ubc_mlp_data=instant_avatar_wild",
+                "--fast",
+                "--no_eval"
+            ],
+        },
+    ]
+}

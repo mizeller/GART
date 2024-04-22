@@ -17,14 +17,12 @@ from lib_gart.model import GaussianTemplateModel, AdditionalBones
 from lib_gart.optim_utils import *
 from lib_render.gauspl_renderer import render_cam_pcl
 
-# from lib_marchingcubes.gaumesh_utils import MeshExtractor
 from lib_gart.model_utils import transform_mu_frame
 
 from utils.misc import *
 from utils.viz import viz_render
 
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
-from pytorch3d.ops import knn_points
 import time
 
 from lib_guidance.camera_sampling import sample_camera, fov2K, opencv2blender
@@ -36,12 +34,6 @@ from utils.ssim import ssim
 import argparse
 from datetime import datetime
 from test_utils import test
-
-try:
-    # from lib_guidance.sd_utils import StableDiffusion
-    from lib_guidance.mvdream.mvdream_guidance import MVDream
-except:
-    logging.warning("No guidance module")
 
 
 class TGFitter:
@@ -59,12 +51,12 @@ class TGFitter:
 
         self.profile_fn = profile_fn
         try:
-            shutil.copy(profile_fn, osp.join(self.log_dir, osp.basename(profile_fn)))
+            shutil.copy(profile_fn, osp.join(self.log_dir, osp.basename(profile_fn))) # copy the config .yaml file to the log directory
         except:
             pass
 
         self.mode = mode
-        assert self.mode in ["human", "dog"], "Only support human and dog for now"
+        assert self.mode in ["human", "dog"], "Only support human and dog for now" # TODO: theoretically, just add a hand here...
 
         self.template_model_path = template_model_path
         self.device = device
@@ -78,10 +70,10 @@ class TGFitter:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-        # * explicitly set flags
+        # * explicitly set flags (iff they don't exist)
         self.FAST_TRAINING = getattr(self, "FAST_TRAINING", False)
-
         self.LAMBDA_SSIM = getattr(self, "LAMBDA_SSIM", 0.0)
+       
         self.LAMBDA_LPIPS = getattr(self, "LAMBDA_LPIPS", 0.0)
         if self.LAMBDA_LPIPS > 0:
             from utils.lpips import LPIPS
@@ -90,16 +82,16 @@ class TGFitter:
             for param in self.lpips.parameters():
                 param.requires_grad = False
 
-        if isinstance(self.RESET_OPACITY_STEPS, int):
-            self.RESET_OPACITY_STEPS = [
-                i
-                for i in range(1, self.TOTAL_steps)
-                if i % self.RESET_OPACITY_STEPS == 0
-            ]
-        if isinstance(self.REGAUSSIAN_STEPS, int):
-            self.REGAUSSIAN_STEPS = [
-                i for i in range(1, self.TOTAL_steps) if i % self.REGAUSSIAN_STEPS == 0
-            ]
+        # if isinstance(self.RESET_OPACITY_STEPS, int):
+        #     self.RESET_OPACITY_STEPS = [
+        #         i
+        #         for i in range(1, self.TOTAL_steps)
+        #         if i % self.RESET_OPACITY_STEPS == 0
+        #     ]
+        # if isinstance(self.REGAUSSIAN_STEPS, int):
+        #     self.REGAUSSIAN_STEPS = [
+        #         i for i in range(1, self.TOTAL_steps) if i % self.REGAUSSIAN_STEPS == 0
+        #     ]
 
         # prepare base R
         if self.mode == "human":
