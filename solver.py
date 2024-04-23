@@ -262,13 +262,7 @@ class TGFitter:
                 lr_delay_mult=0.01,  # 0.02
             )
 
-        pose_optim_mode = getattr(self, "POSE_OPTIM_MODE", "adam")
-        if pose_optim_mode == "adam":
-            optimizer_smpl = torch.optim.Adam(pose_optim_l)
-        elif pose_optim_mode == "sgd":
-            optimizer_smpl = torch.optim.SGD(pose_optim_l)
-        else:
-            raise NotImplementedError(f"Unknown pose optimizer mode {pose_optim_mode}")
+        optimizer_smpl = torch.optim.Adam(pose_optim_l)
         return optimizer_smpl, scheduler_dict
 
     def _guide_step(
