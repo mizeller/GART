@@ -159,7 +159,7 @@ def viz_human_all(
                 K,
                 False,
                 active_sph_order,
-                bg_color=getattr(solver, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+                bg_color=[0.0, 0.0, 0.0],
             )
             viz_frame = viz_render(rgb_list[t], mask_list[t], render_pkg)
             viz_frames.append(viz_frame)
@@ -195,7 +195,7 @@ def viz_human_all(
             time_index=None,  # if set to None and use t, the add_bone will hand this
             n_spinning=n_spinning,
             active_sph_order=model.max_sph_order,
-            bg_color=getattr(solver, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+            bg_color=[0.0, 0.0, 0.0],
         )
 
     # viz novel pose dynamic spinning
@@ -252,7 +252,7 @@ def viz_human_all(
                 K,
                 False,
                 active_sph_order,
-                bg_color=getattr(solver, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+                bg_color=[0.0, 0.0, 0.0],
                 # bg_color=[1.0, 1.0, 1.0],  # ! use white bg for viz
             )
             viz_frame = (

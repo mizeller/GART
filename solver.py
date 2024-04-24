@@ -131,32 +131,29 @@ class TGFitter:
         model = GaussianTemplateModel(
             template=None,
             betas=betas,
-            w_correction_flag=getattr(self, "W_CORRECTION_FLAG", False),
-            w_rest_dim=getattr(self, "W_REST_DIM", 0),
-            f_localcode_dim=getattr(self, "F_LOCALCODE_DIM", 0),
-            max_sph_order=getattr(self, "MAX_SPH_ORDER", 0),
-            w_memory_type=getattr(self, "W_MEMORY_TYPE", "point"),
-            max_scale=getattr(self, "MAX_SCALE", 0.1),
-            min_scale=getattr(self, "MIN_SCALE", 0.0),
+            w_correction_flag=self.W_CORRECTION_FLAG,
+            w_rest_dim=0,  # 4 #0 #16
+            f_localcode_dim=0,
+            max_sph_order=1,  # 0
+            w_memory_type="voxel",  # "point"
+            max_scale=1.0,  # 0.03
+            min_scale=0.0,  # 0.0003 #0.003 #3
             # * init
-            init_mode=getattr(self, "INIT_MODE", "on_mesh"),
-            opacity_init_value=getattr(self, "OPACITY_INIT_VALUE", 0.9),
+            opacity_init_value=0.99,  # 0.9
             # on mesh init
-            onmesh_init_subdivide_num=getattr(self, "ONMESH_INIT_SUBDIVIDE_NUM", 0),
-            onmesh_init_scale_factor=getattr(self, "ONMESH_INIT_SCALE_FACTOR", 1.0),
-            onmesh_init_thickness_factor=getattr(
-                self, "ONMESH_INIT_THICKNESS_FACTOR", 0.5
-            ),
+            onmesh_init_subdivide_num=0,
+            onmesh_init_scale_factor=1.0,
+            onmesh_init_thickness_factor=0.5,
             # near mesh init
-            nearmesh_init_num=getattr(self, "NEARMESH_INIT_NUM", 1000),
-            nearmesh_init_std=getattr(self, "NEARMESH_INIT_STD", 0.5),
-            scale_init_value=getattr(self, "SCALE_INIT_VALUE", 1.0),
+            nearmesh_init_num=10000,
+            nearmesh_init_std=0.1,  # 0.5
+            scale_init_value=0.01,  # only used for random init
         ).to(self.device)
 
         logging.info(f"Init with {model.N} Gaussians")
 
         # * set optimizer
-        LR_SPH_REST = getattr(self, "LR_SPH_REST", self.LR_SPH / 20.0)
+        LR_SPH_REST = self.LR_SPH / 20.0
         optimizer = torch.optim.Adam(
             model.get_optimizable_list(
                 lr_p=self.LR_P,
@@ -167,7 +164,7 @@ class TGFitter:
                 lr_sph_rest=LR_SPH_REST,
                 lr_w=self.LR_W,
                 lr_w_rest=self.LR_W_REST,
-                lr_f=getattr(self, "LR_F_LOCAL", 0.0),
+                lr_f=0.0,
             ),
         )
 
@@ -177,29 +174,31 @@ class TGFitter:
             lr_delay_mult=0.01,  # 0.02
             max_steps=self.TOTAL_steps,
         )
+
+        init_step = 1500 #1000 #500 #2000 #300 #2000
         w_dc_scheduler_func = get_expon_lr_func_interval(
-            init_step=getattr(self, "W_START_STEP", 0),
-            final_step=getattr(self, "W_END_STEP", self.TOTAL_steps),
+            init_step=init_step,
+            final_step=self.TOTAL_steps,
             lr_init=self.LR_W,
-            lr_final=getattr(self, "LR_W_FINAL", self.LR_W),
+            lr_final=0.00001,
             lr_delay_mult=0.01,  # 0.02
         )
         w_rest_scheduler_func = get_expon_lr_func_interval(
-            init_step=getattr(self, "W_START_STEP", 0),
-            final_step=getattr(self, "W_END_STEP", self.TOTAL_steps),
-            lr_init=self.LR_W_REST,
-            lr_final=getattr(self, "LR_W_REST_FINAL", self.LR_W_REST),
-            lr_delay_mult=0.01,  # 0.02
+            init_step=init_step,
+            final_step=self.TOTAL_steps,
+            lr_init=0.00003,
+            lr_final=0.000003,
+            lr_delay_mult=0.01,
         )
         sph_scheduler_func = get_expon_lr_func(
             lr_init=self.LR_SPH,
-            lr_final=getattr(self, "LR_SPH_FINAL", self.LR_SPH),
+            lr_final=self.LR_SPH,
             lr_delay_mult=0.01,  # 0.02
             max_steps=self.TOTAL_steps,
         )
         sph_rest_scheduler_func = get_expon_lr_func(
             lr_init=LR_SPH_REST,
-            lr_final=getattr(self, "LR_SPH_REST_FINAL", LR_SPH_REST),
+            lr_final=LR_SPH_REST,
             lr_delay_mult=0.01,  # 0.02
             max_steps=self.TOTAL_steps,
         )
@@ -219,8 +218,8 @@ class TGFitter:
         # * prepare pose optimizer list and the schedulers
         scheduler_dict, pose_optim_l = {}, []
         if data_provider is not None:
-            start_step = getattr(self, "POSE_OPTIMIZE_START_STEP", 0)
-            end_step = getattr(self, "POSE_OPTIMIZE_END_STEP", self.TOTAL_steps)
+            start_step =1500 #500 #1000
+            end_step = self.TOTAL_steps
             pose_optim_l.extend(
                 [
                     {
@@ -244,21 +243,21 @@ class TGFitter:
                 init_step=start_step,
                 final_step=end_step,
                 lr_init=self.POSE_R_BASE_LR,
-                lr_final=getattr(self, "POSE_R_BASE_LR_FINAL", self.POSE_R_BASE_LR),
+                lr_final=0.0001,
                 lr_delay_mult=0.01,  # 0.02
             )
             scheduler_dict["pose_rest"] = get_expon_lr_func_interval(
                 init_step=start_step,
                 final_step=end_step,
                 lr_init=self.POSE_R_REST_LR,
-                lr_final=getattr(self, "POSE_R_REST_LR_FINAL", self.POSE_R_REST_LR),
+                lr_final=0.0001,
                 lr_delay_mult=0.01,  # 0.02
             )
             scheduler_dict["pose_trans"] = get_expon_lr_func_interval(
                 init_step=start_step,
                 final_step=end_step,
                 lr_init=self.POSE_T_LR,
-                lr_final=getattr(self, "POSE_T_LR_FINAL", self.POSE_T_LR),
+                lr_final=0.0001,
                 lr_delay_mult=0.01,  # 0.02
             )
 
@@ -282,10 +281,7 @@ class TGFitter:
             nview = 4
         else:
             nview = 1
-        if getattr(self, "RAND_BG_FLAG", False):
-            bg = np.random.uniform(0.0, 1.0, size=3)
-        else:
-            bg = np.array(getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]))
+        bg = np.random.uniform(0.0, 1.0, size=3)
         H, W = 256, 256
 
         random_seed = np.random.uniform(0.0, 1.0)
@@ -312,8 +308,8 @@ class TGFitter:
 
         # sample camera
         T_ocam, fovy_deg = sample_camera(
-            random_elevation_range=getattr(self, "CAM_ELE_RANGE", [-30, 60]),
-            camera_distance_range=getattr(self, "CAM_DIST_RANGE", [1.1, 1.3]),
+            random_elevation_range=[-30, 60],
+            camera_distance_range=[1.1, 1.3],
             relative_radius=True,
             n_view=nview,
         )
@@ -558,7 +554,7 @@ class TGFitter:
         )
 
     def compute_reg3D(self, model: GaussianTemplateModel):
-        K = getattr(self, "CANONICAL_SPACE_REG_K", 10)
+        K = 6
         (
             q_std,
             s_std,
@@ -574,27 +570,18 @@ class TGFitter:
             max_s_sq,
         ) = model.compute_reg(K)
 
-        lambda_std_q = getattr(self, "LAMBDA_STD_Q", 0.0)  # zju_3m.yaml -> 0.01
-        lambda_std_s = getattr(self, "LAMBDA_STD_S", 0.0)  # zju_3m.yaml -> 0.01
-        lambda_std_o = getattr(self, "LAMBDA_STD_O", 0.0)  # zju_3m.yaml -> 0.01
-        lambda_std_cd = getattr(self, "LAMBDA_STD_CD", 0.0)  # zju_3m.yaml -> 0.01
-        lambda_std_ch = getattr(
-            self, "LAMBDA_STD_CH", lambda_std_cd
-        )  # zju_3m.yaml -> 0.01
-        lambda_std_w = getattr(self, "LAMBDA_STD_W", 0.3)  # zju_3m.yaml -> 0.3
-        lambda_std_w_rest = getattr(
-            self, "LAMBDA_STD_W_REST", lambda_std_w
-        )  # zju_3m.yaml -> 0.5
-        lambda_small_scale = getattr(
-            self, "LAMBDA_SMALL_SCALE", 0.0
-        )  # zju_3m.yaml -> 0.01
-        lambda_w_norm = getattr(self, "LAMBDA_W_NORM", 0.1)  # zju_3m.yaml -> 0.01
-        lambda_w_rest_norm = getattr(
-            self, "LAMBDA_W_REST_NORM", lambda_w_norm
-        )  # zju_3m.yaml -> 0.01
-
-        lambda_std_f = getattr(self, "LAMBDA_STD_F", lambda_std_w)  # not in zju_3m.yaml
-        lambda_knn_dist = getattr(self, "LAMBDA_KNN_DIST", 0.0)  # not in zju_3m.yaml
+        lambda_std_q = 0.01
+        lambda_std_s = 0.01
+        lambda_std_o = 0.01
+        lambda_std_cd = 0.01
+        lambda_std_ch = 0.01
+        lambda_std_w = 0.3
+        lambda_std_w_rest = 0.5
+        lambda_small_scale = 0.01
+        lambda_w_norm = 0.01
+        lambda_w_rest_norm = 0.01
+        lambda_std_f = lambda_std_w
+        lambda_knn_dist = 0.0
 
         # regression loss L_reg
         reg_loss = (
@@ -631,14 +618,12 @@ class TGFitter:
     def add_scalar(self, *args, **kwargs):
         if self.FAST_TRAINING:
             return
-        if getattr(self, "NO_TB", False):
-            return
         self.writer.add_scalar(*args, **kwargs)
         return
 
     def get_sd_step_ratio(self, step):
-        start = getattr(self, "SD_RATIO_START_STEP", 0)
-        end = getattr(self, "SD_RATIO_END_STEP", self.TOTAL_steps)
+        start = 0
+        end = self.TOTAL_steps
         len = end - start
         if (step + 1) <= start:
             return 1.0 / len
@@ -650,7 +635,7 @@ class TGFitter:
 
     def get_guidance_scale(self, step):
         scale = self.GUIDANCE_SCALE
-        end_scale = getattr(self, "GUIDANCE_SCALE_END", scale)
+        end_scale = scale
         ret = scale + (end_scale - scale) * (step / self.TOTAL_steps)
         return ret
 
@@ -718,9 +703,9 @@ class TGFitter:
                 model,
                 data_pack=real_data_pack,
                 act_sph_ord=active_sph_order,
-                random_bg=self.RAND_BG_FLAG,
-                use_box_crop_pad=getattr(self, "BOX_CROP_PAD", -1),
-                default_bg=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+                random_bg=True,
+                use_box_crop_pad=20,
+                default_bg=[0.0, 0.0, 0.0],
             )
             loss = loss + loss_recon
             for k, v in loss_dict.items():
@@ -729,7 +714,7 @@ class TGFitter:
             if (
                 last_reset_step < 0
                 or step - last_reset_step > self.MASK_LOSS_PAUSE_AFTER_RESET
-                and step > getattr(self, "MASK_START_STEP", 0)
+                and step > 0
             ):
                 loss = loss + self.LAMBDA_MASK * loss_mask
                 self.add_scalar("loss_mask", loss_mask.detach(), step)
@@ -744,7 +729,7 @@ class TGFitter:
             loss.backward()
             optimizer.step()
 
-            if step > getattr(self, "POSE_OPTIMIZE_START_STEP", -1):
+            if step > 1500:
                 optimizer_pose.step()
 
             self.add_scalar("N", model.N, step)
@@ -760,7 +745,7 @@ class TGFitter:
 
             if (
                 step > self.DENSIFY_START
-                and step < getattr(self, "DENSIFY_END", 10000000)
+                and step < 2500 #10000 #15000
                 and step % self.DENSIFY_INTERVAL == 0
             ):
                 N_old = model.N
@@ -781,27 +766,21 @@ class TGFitter:
                     max_screen_size=1e10,  # ! disabled
                 )
                 logging.info(f"Prune: {N_old}->{model.N}")
-            if step in getattr(self, "RANDOM_GROW_STEPS", []):
-                model.random_grow(
-                    optimizer,
-                    num_factor=getattr(self, "NUM_FACTOR", 0.1),
-                    std=getattr(self, "RANDOM_GROW_STD", 0.1),
-                    init_opa_value=getattr(self, "RANDOM_GROW_OPA", 0.01),
-                )
 
             if (step + 1) in self.RESET_OPACITY_STEPS:
                 model.reset_opacity(optimizer, self.OPACIT_RESET_VALUE)
                 last_reset_step = step
 
-            if (step + 1) in getattr(self, "REGAUSSIAN_STEPS", []):
+            if (step + 1) in self.REGAUSSIAN_STEPS:
                 model.regaussian(optimizer, self.REGAUSSIAN_STD)
 
             stat_n_list.append(model.N)
+
             if self.FAST_TRAINING:
                 continue
 
             # * Viz
-            if (step + 1) % getattr(self, "VIZ_INTERVAL", 100) == 0 or step == 0:
+            if (step + 1) % 500 == 0 or step == 0:
                 mu, fr, s, o, sph = model_ret[:5]
                 save_path = f"{self.log_dir}/viz_step/step_{step}.png"
                 viz_render(gt_rgb[0], gt_mask[0], render_list[0], save_path=save_path)
@@ -825,8 +804,7 @@ class TGFitter:
                     save_path=f"{self.log_dir}/viz_step/spinning_{step}.gif",
                     time_index=time_index,
                     active_sph_order=active_sph_order,
-                    # bg_color=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
-                    bg_color=[1.0, 1.0, 1.0],
+                    bg_color=[0.0, 0.0, 0.0],
                 )
 
                 can_pose = model.template.canonical_pose.detach()
@@ -850,8 +828,7 @@ class TGFitter:
                     save_path=f"{self.log_dir}/viz_step/spinning_can_{step}.gif",
                     time_index=None,  # canonical pose use t=None
                     active_sph_order=active_sph_order,
-                    # bg_color=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
-                    bg_color=[1.0, 1.0, 1.0],
+                    bg_color=[0.0, 0.0, 0.0],
                 )
 
                 # viz the distrbution
@@ -950,7 +927,7 @@ class TGFitter:
                 [gt_rgb, gt_mask, K, pose_b, pose_r, trans, None],
                 act_sph_ord=model.max_sph_order,
                 random_bg=False,
-                default_bg=getattr(self, "DEFAULT_BG", [1.0, 1.0, 1.0]),
+                default_bg=[0.0, 0.0, 0.0],
             )
             loss = loss_recon
             loss.backward()

@@ -1,0 +1,49 @@
+TOTAL_steps: 100 #15000 #30000
+SEED: 12345
+W_CORRECTION_FLAG: True
+INCREASE_SPH_STEP: [2000] # this var is used
+FAST_TRAINING: False
+
+###########################
+LR_P: 0.00016
+LR_P_FINAL: 0.0000016
+LR_Q: 0.005
+LR_S: 0.005
+LR_O: 0.05
+LR_SPH: 0.005 
+
+LR_W: 0.0001 # 1 # 0.00001
+
+LR_W_REST: 0.00003
+###########################
+
+POSE_R_BASE_LR: 0.0001
+POSE_R_REST_LR: 0.0001
+POSE_T_LR: 0.0001
+
+# Reg Terms
+LAMBDA_MASK: 0.0 #0.01
+MASK_LOSS_PAUSE_AFTER_RESET: 100
+
+# other optim
+N_POSES_PER_STEP: 1 #50 #1 #3 # increasing this does not help
+
+# GS Control
+# densify
+MAX_GRAD: 0.0001 #0.0003 #0.0005 #0.0006 # 0.0002
+PERCENT_DENSE: 0.01
+DENSIFY_START: 100
+DENSIFY_INTERVAL: 401 #300 #500 #1000 #300
+# prune
+PRUNE_START: 200
+PRUNE_INTERVAL: 401
+OPACIT_PRUNE_TH: 0.05
+RESET_OPACITY_STEPS: [2002]
+OPACIT_RESET_VALUE: 0.05
+# regaussian
+REGAUSSIAN_STD: 0.02 #0.02 #0.02 #0.01
+REGAUSSIAN_STEPS: [] #3000 #[3502, 6502, 9502, 12502] #[3502, 5502, 7502] #[3502, 4502]
+
+LAMBDA_LPIPS: 0.0 # 0.001 # learned perceptual image patch similarity metric
+LAMBDA_SSIM: 0.1 # structural similarity index measure // used in training loss
+

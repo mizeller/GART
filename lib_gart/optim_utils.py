@@ -59,9 +59,6 @@ def update_learning_rate(lr, names, optimizer):
     for param_group in optimizer.param_groups:
         if param_group["name"] in names:
             param_group["lr"] = lr
-            # print("debug")
-            # print(f"Update {name} lr to {lr}")
-    # have to iterate over all param_groups, because some param_groups may not have name
     return lr
 
 

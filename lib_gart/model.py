@@ -5,11 +5,7 @@ sys.path.append(osp.dirname(osp.abspath(__file__)))
 import torch
 from torch import nn
 from optim_utils import *
-from init_helpers import (
-    get_near_mesh_init_geo_values,
-    get_on_mesh_init_geo_values,
-    get_inside_mesh_init_geo_values,
-)
+from init_helpers import get_on_mesh_init_geo_values
 import logging
 from lib_gart.templates import SMPLTemplate
 from pytorch3d.transforms import quaternion_to_matrix
@@ -33,7 +29,6 @@ class GaussianTemplateModel(nn.Module):
         max_scale=0.1,  # use sigmoid activation, can't be too large
         min_scale=0.0,
         # geo init
-        init_mode="on_mesh",
         opacity_init_value=0.9,  # the init value of opacity
         # on mesh init params
         onmesh_init_subdivide_num=0,
@@ -63,37 +58,17 @@ class GaussianTemplateModel(nn.Module):
         self._init_act(self.max_scale, self.min_scale)
         self.opacity_init_logit = self.o_inv_act(opacity_init_value)
 
-        # * init geometry (in zju_3m.yaml -> on_mesh)
-        if init_mode == "on_mesh":
-            x, q, s, o = get_on_mesh_init_geo_values(
-                template,
-                on_mesh_subdivide=onmesh_init_subdivide_num,
-                scale_init_factor=onmesh_init_scale_factor,
-                thickness_init_factor=onmesh_init_thickness_factor,
-                max_scale=max_scale,
-                min_scale=min_scale,
-                s_inv_act=self.s_inv_act,
-                opacity_init_logit=self.opacity_init_logit,
-            )
-        elif init_mode == "near_mesh":
-            self.scale_init_logit = self.s_inv_act(scale_init_value)
-            x, q, s, o = get_near_mesh_init_geo_values(
-                template,
-                scale_base_logit=self.scale_init_logit,
-                opacity_base_logit=self.opacity_init_logit,
-                random_init_num=nearmesh_init_num,
-                random_init_std=nearmesh_init_std,
-            )
-        elif init_mode == "in_mesh":
-            self.scale_init_logit = self.s_inv_act(scale_init_value)
-            x, q, s, o = get_inside_mesh_init_geo_values(
-                template,
-                scale_base_logit=self.scale_init_logit,
-                opacity_base_logit=self.opacity_init_logit,
-                random_init_num=nearmesh_init_num,
-            )
-        else:
-            raise NotImplementedError(f"Unknown init_mode {init_mode}")
+        # * init geometry on mesh
+        x, q, s, o = get_on_mesh_init_geo_values(
+            template,
+            on_mesh_subdivide=onmesh_init_subdivide_num,
+            scale_init_factor=onmesh_init_scale_factor,
+            thickness_init_factor=onmesh_init_thickness_factor,
+            max_scale=max_scale,
+            min_scale=min_scale,
+            s_inv_act=self.s_inv_act,
+            opacity_init_logit=self.opacity_init_logit,
+        )
         self._xyz = nn.Parameter(x)
         self._rotation = nn.Parameter(q)
         self._scaling = nn.Parameter(s)

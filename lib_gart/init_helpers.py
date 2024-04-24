@@ -12,22 +12,6 @@ from pytorch3d.transforms import (
 import logging, time
 import os
 
-def init_qso_naive(N, opacity_base_logit, scale_base_logit):
-    o = nn.Parameter(torch.ones(N, 1) * opacity_base_logit)
-    s = torch.ones(N, 3) * scale_base_logit
-    q = torch.zeros(N, 4)
-    q[:, 0] = 1.0
-    return q, s, o
-
-
-def init_xyz_near_mesh(v_init, faces, n_init, init_std):
-    tmesh = trimesh.Trimesh(v_init, faces, process=False)
-    mesh_pts, _ = trimesh.sample.sample_surface_even(tmesh, n_init)
-    noise = np.random.randn(*mesh_pts.shape) * init_std
-    xyz_init = torch.from_numpy(mesh_pts + noise)
-    return xyz_init.float()
-
-
 def init_xyz_on_mesh(v_init, faces, subdivide_num):
     # * xyz
     denser_v, denser_f = v_init.detach().cpu().numpy(), faces
@@ -109,46 +93,5 @@ def get_on_mesh_init_geo_values(
     return x, q, s, o
 
 
-def get_near_mesh_init_geo_values(
-    template, scale_base_logit, opacity_base_logit, random_init_num, random_init_std
-):
-    v, f = template.get_init_vf()
-    x = init_xyz_near_mesh(v, f, random_init_num, random_init_std)
-    q, s, o = init_qso_naive(len(x), opacity_base_logit, scale_base_logit)
-    return x, q, s, o
 
 
-def get_inside_mesh_init_geo_values(
-    template, scale_base_logit, opacity_base_logit, random_init_num, buffer_factor=10
-):
-    v, f = template.get_init_vf()
-
-    tmesh = trimesh.Trimesh(v, f, process=False)
-
-    bounds = tmesh.bounds  # [2,3]
-    # generate random points inside the bounds
-    os.makedirs("cache", exist_ok=True)
-    mode = template.name
-    cache_fn = f"cache/{mode}_{template.cano_pose_type}_{random_init_num}.npz"
-    
-    if os.path.exists(cache_fn):
-        x = np.load(cache_fn)["x"]
-    else:
-        x = (
-            torch.rand(random_init_num * buffer_factor, 3) * (bounds[1] - bounds[0])
-            + bounds[0]
-        )
-        logging.info(f"Init with trimesh contained examination {len(x)} pts ...")
-        start_time = time.time()
-        contained = tmesh.contains(x)
-        logging.info(
-            "Init inside with trimesh contained function done in {}s".format(
-                time.time() - start_time
-            )
-        )
-        x = x[contained][:random_init_num]
-        np.savez_compressed(cache_fn, x=x.numpy().astype(np.float16))
-    x = torch.as_tensor(x, dtype=torch.float32)
-    logging.info(f"Init {len(x)} Components inside the mesh")
-    q, s, o = init_qso_naive(len(x), opacity_base_logit, scale_base_logit)
-    return x, q, s, o
