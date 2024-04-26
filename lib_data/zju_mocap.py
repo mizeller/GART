@@ -1,50 +1,17 @@
-# take the instant avatar format
-# ! Warning, must use the pre-processed People Snapshot!!
-
-from torch.utils.data import Dataset
-import numpy as np
-import os.path as osp
-import imageio
-import cv2
 from transforms3d.axangles import mat2axangle, axangle2mat
 from pytorch3d.transforms import axis_angle_to_matrix
+
+from torch.utils.data import Dataset
+import os.path as osp
+import numpy as np
+import imageio
+import cv2
 import torch
 import sys
 
 sys.path.append(osp.dirname(osp.abspath(__file__)))
 
 from smplx.smplx import SMPLLayer
-
-META = {
-    "my_392": {"begin_ith_frame": 0, "num_train_frame": 100, "frame_interval": 5},
-}
-
-# This is the sampler they used for testing, for seq 377, the actual dataset len is 2200, but after their dataloader, they only use 374 frames!!
-from torch.utils.data.sampler import Sampler
-
-
-class FrameSampler(Sampler):
-    """Sampler certain frames for test"""
-
-    def __init__(self, dataset, frame_sampler_interval):
-        inds = np.arange(0, len(dataset.ims))
-        ni = len(dataset.ims) // dataset.num_cams
-        inds = inds.reshape(ni, -1)[::frame_sampler_interval]
-        self.inds = inds.ravel()
-
-    def __iter__(self):
-        return iter(self.inds)
-
-    def __len__(self):
-        return len(self.inds)
-
-
-def get_batch_sampler(dataset, frame_sampler_interval=6):
-    # instant-nvr use 6
-    sampler = FrameSampler(dataset, frame_sampler_interval=frame_sampler_interval)
-    batch_sampler = torch.utils.data.sampler.BatchSampler(sampler, 1, False)
-    return batch_sampler
-
 
 DEBUG = False
 
@@ -69,21 +36,18 @@ class Dataset(Dataset):
         self.data_root = data_root
         self.video_name = video_name
         self.image_zoom_ratio = image_zoom_ratio
-
         self.bg_color = bg_color
 
-        root = osp.join(data_root, video_name)
-
-        anno_fn = osp.join(root, "annots.npy")
-        annots = np.load(anno_fn, allow_pickle=True).item()
+        root = osp.join(data_root, video_name)  # data/zju-mocap/my_392
+        anno_fn = osp.join(root, "annots.npy")  # data/zju-mocap/my_392/annots.npy
+        annots = np.load(anno_fn, allow_pickle=True).item()  # keys: ims, cams,
         self.cams = annots["cams"]
 
         # ! Check the run.py in instant-nvr evaluation
-
-        num_cams = len(self.cams["K"])
-        test_view = [i for i in range(num_cams) if i not in training_view]
-        if len(test_view) == 0:
-            test_view = [0]
+        num_cams = len(self.cams["K"])  # ∃ 23 cams
+        test_view = [
+            i for i in range(num_cams) if i not in training_view
+        ]  # all views apart from training_view (4)
 
         if split == "train" or split == "prune":
             self.view = training_view
@@ -92,10 +56,10 @@ class Dataset(Dataset):
         elif split == "val":
             self.view = test_view[::4]
 
-        i = META[self.video_name]["begin_ith_frame"]
-        i_intv = META[self.video_name]["frame_interval"]
+        i = 0  # begin_ith_frame
+        i_intv = 5  # frame_interval
         self.f_intv = i_intv
-        ni = META[self.video_name]["num_train_frame"]
+        ni = 100  # num_train_frame
         if split == "val":
             self.view = [5]
             self.tick = 0

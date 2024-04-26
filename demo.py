@@ -42,18 +42,17 @@ def prepare_real_seq(seq_name: str, log_dir: str, device=torch.device("cuda:0"))
 
 
 def main_zju() -> None:
-    dataset_mode = "zju"
+    # set up
     seq_name = "my_392"
     profile_fn = "./profiles/zju_3m.yaml"
     log_dir = f"./logs/dbg_zju/{str(uuid.uuid4())[:8]}"
-
-    # init Gaussian Template Fitter
-    solver = TGFitter(log_dir=log_dir, profile_fn=profile_fn, debug=False)
-
     logging.info(f"saving logs to: {log_dir}")
 
     # init data provider
     data_provider, _ = prepare_real_seq(seq_name=seq_name, log_dir=log_dir)
+
+    # init Gaussian Template Fitter
+    solver = TGFitter(log_dir=log_dir, profile_fn=profile_fn, debug=False)
 
     # run optimization
     gaussian_template_model, optimized_seq = solver.run(data_provider=data_provider)
@@ -65,17 +64,7 @@ def main_zju() -> None:
         solver=solver, data_provider=optimized_seq, model=gaussian_template_model
     )
 
-    test(
-        solver,
-        seq_name=seq_name,
-        tto_flag=True,
-        tto_step=50,
-        tto_decay=10,
-        dataset_mode=dataset_mode,
-        pose_base_lr=3e-3,
-        pose_rest_lr=3e-3,
-        trans_lr=3e-3,
-    )
+    # test(solver, seq_name=seq_name, tto_step=50, tto_decay=10)
 
 
 if __name__ == "__main__":

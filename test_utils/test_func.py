@@ -11,11 +11,30 @@ from lib_render.gauspl_renderer import render_cam_pcl
 import cv2, glob
 import pandas as pd
 from tqdm import tqdm
-from lib_data.zju_mocap import Dataset as ZJUDataset, get_batch_sampler
+from lib_data.zju_mocap import Dataset as ZJUDataset
 import logging
 
 
-def _get_evaluator(mode, device):
+from torch.utils.data.sampler import Sampler
+
+
+class FrameSampler(Sampler):
+    """Sampler certain frames for test"""
+
+    def __init__(self, dataset, frame_sampler_interval):
+        inds = np.arange(0, len(dataset.ims))
+        ni = len(dataset.ims) // dataset.num_cams
+        inds = inds.reshape(ni, -1)[::frame_sampler_interval]
+        self.inds = inds.ravel()
+
+    def __iter__(self):
+        return iter(self.inds)
+
+    def __len__(self):
+        return len(self.inds)
+
+
+def _get_evaluator(device):
     evaluator = EvalNVR()
     evaluator = evaluator.to(device)
     evaluator.eval()
@@ -32,11 +51,9 @@ def test(
     pose_base_lr=3e-3,
     pose_rest_lr=3e-3,
     trans_lr=3e-3,
-    dataset_mode="zju",
 ):
     device = solver.device
     model = solver.load_saved_model()
-    eval_mode = "nvr"
     test_dataset = ZJUDataset(
         data_root="./data/zju_mocap",
         video_name=seq_name,
@@ -45,7 +62,7 @@ def test(
     )
     bg = [0.0, 0.0, 0.0]  # zju use black background
 
-    evaluator = _get_evaluator(eval_mode, device)
+    evaluator = _get_evaluator(device)
 
     _save_eval_maps(
         solver.log_dir,
@@ -53,7 +70,6 @@ def test(
         model,
         solver,
         test_dataset,
-        dataset_mode=dataset_mode,
         device=device,
         bg=bg,
         tto_flag=tto_flag,
@@ -74,13 +90,19 @@ def test(
     return
 
 
+def _get_batch_sampler(dataset, frame_sampler_interval=6):
+    # instant-nvr use 6
+    sampler = FrameSampler(dataset, frame_sampler_interval=frame_sampler_interval)
+    batch_sampler = torch.utils.data.sampler.BatchSampler(sampler, 1, False)
+    return batch_sampler
+
+
 def _save_eval_maps(
     log_dir,
     save_name,
     model,
     solver,
     test_dataset,
-    dataset_mode="people_snapshot",
     bg=[1.0, 1.0, 1.0],
     # tto
     tto_flag=False,
@@ -104,7 +126,7 @@ def _save_eval_maps(
     # ! follow instant-nvr evaluation
     iter_test_dataset = torch.utils.data.DataLoader(
         test_dataset,
-        batch_sampler=get_batch_sampler(test_dataset, frame_sampler_interval=6),
+        batch_sampler=_get_batch_sampler(test_dataset),
         num_workers=0,
     )
 
