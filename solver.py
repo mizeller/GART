@@ -227,7 +227,7 @@ class TGFitter:
     def __init__(
         self,
         log_dir,
-        profile_fn,
+        profile_fn="./profiles/zju_3m.yaml",
         device=torch.device("cuda:0"),
         debug: bool = True,
     ):

@@ -13,23 +13,15 @@ sys.path.append(osp.dirname(osp.abspath(__file__)))
 
 from smplx.smplx import SMPLLayer
 
-DEBUG = False
-
 
 class Dataset(Dataset):
     # from instant avatar
     def __init__(
         self,
-        data_root="data/zju-mocap",
+        data_root="./data/zju_mocap",
         video_name="my_392",
         split="train",
-        image_zoom_ratio=0.5,  # 0.5,  # instant-nvr use 0.5 for both train and test
-        # for cfg input from instant-nvr
-        # for zju mocap instant-nvr use test_view: []; training_view: [4]
-        training_view=[4],
-        num_eval_frame=-1,
-        test_novel_pose=False,
-        # my cfg
+        image_zoom_ratio=0.5,
         bg_color=0.0,
     ) -> None:
         super().__init__()
@@ -45,43 +37,26 @@ class Dataset(Dataset):
 
         # ! Check the run.py in instant-nvr evaluation
         num_cams = len(self.cams["K"])  # ∃ 23 cams
+        training_view = [4]
         test_view = [
             i for i in range(num_cams) if i not in training_view
         ]  # all views apart from training_view (4)
 
         if split == "train" or split == "prune":
             self.view = training_view
-        elif split == "test":
+        else:  # split == "test":
             self.view = test_view
-        elif split == "val":
-            self.view = test_view[::4]
-
-        i = 0  # begin_ith_frame
-        i_intv = 5  # frame_interval
-        self.f_intv = i_intv
-        ni = 100  # num_train_frame
-        if split == "val":
-            self.view = [5]
-            self.tick = 0
-            ni = 500
-            i_intv = 1
-        if test_novel_pose:
-            i = (
-                META[self.video_name]["begin_ith_frame"]
-                + META[self.video_name]["num_train_frame"] * i_intv
-            )
-            ni = num_eval_frame
 
         self.ims = np.array(
             [
                 np.array(ims_data["ims"])[self.view]
-                for ims_data in annots["ims"][i : i + ni * i_intv][::i_intv]
+                for ims_data in annots["ims"][0 : 100 * 5][::5]
             ]
         ).ravel()
         self.cam_inds = np.array(
             [
                 np.arange(len(ims_data["ims"]))[self.view]
-                for ims_data in annots["ims"][i : i + ni * i_intv][::i_intv]
+                for ims_data in annots["ims"][0 : 100 * 5][::5]
             ]
         ).ravel()
         self.num_cams = len(self.view)
@@ -145,67 +120,6 @@ class Dataset(Dataset):
             smpl_beta_list.append(beta)
             self.smpl_trans_list.append(smpl_trans)
 
-            # ! debug
-            if DEBUG:
-                vtx_fn = osp.join(root, "vertices", f"{frame_idx}.npy")
-                nb_vtx_world = np.load(vtx_fn)
-                np.savetxt("../debug/nb_vtx_world.xyz", nb_vtx_world, fmt="%.6f")
-                nb_vtx_cam = np.dot(nb_vtx_world.copy(), T_cw[:3, :3].T) + T_cw[:3, 3]
-                np.savetxt("../debug/nb_vtx_cam.xyz", nb_vtx_cam, fmt="%.6f")
-                T_hw = np.linalg.inv(T_wh)
-                nb_vtx_human = np.dot(nb_vtx_world.copy(), T_hw[:3, :3].T) + T_hw[:3, 3]
-                Rh = smpl_data["Rh"][0]
-                R = cv2.Rodrigues(Rh)[0].astype(np.float32)
-                Th = smpl_data["Th"][0]
-                nb_vtx_human2 = np.dot(nb_vtx_world.copy() - Th, R)
-                np.savetxt("../debug/nb_vtx_human2.xyz", nb_vtx_human2, fmt="%.6f")
-                np.savetxt("../debug/nb_vtx_human.xyz", nb_vtx_human, fmt="%.6f")
-
-                smpl_vtx_human2 = (
-                    smpl_layer(
-                        torch.from_numpy(beta)[None],
-                        body_pose=_pose[:, 1:],
-                        # !!wired!!
-                        global_orient=_pose[:, 0],
-                        transl=torch.from_numpy(smpl_trans)[None],
-                    )
-                    .vertices[0]
-                    .numpy()
-                )
-                np.savetxt("../debug/smpl_vtx_cam2.xyz", smpl_vtx_human2, fmt="%.6f")
-
-                smpl_vtx_human = smpl_layer(
-                    torch.from_numpy(beta)[None], body_pose=_pose[:, 1:]
-                )
-                smpl_vtx_human = smpl_vtx_human.vertices[0].numpy()
-                np.savetxt("../debug/smpl_vtx_human.xyz", smpl_vtx_human, fmt="%.6f")
-                smpl_vtx_world = np.dot(smpl_vtx_human, T_wh[:3, :3].T) + T_wh[:3, 3]
-                np.savetxt("../debug/smpl_vtx_world.xyz", smpl_vtx_world, fmt="%.6f")
-                smpl_vtx_cam = np.dot(smpl_vtx_human, T_ch[:3, :3].T) + T_ch[:3, 3]
-                np.savetxt("../debug/smpl_vtx_cam.xyz", smpl_vtx_cam, fmt="%.6f")
-
-                # the smpl and nb are aligned
-
-                img = imageio.imread(osp.join(root, img_fn)).astype(np.float32) / 255.0
-                K = np.array(self.cams["K"][cam_ind])
-                screen_smpl_vtx = np.dot(smpl_vtx_cam.copy(), K.T)
-                screen_smpl_vtx = screen_smpl_vtx[:, :2] / screen_smpl_vtx[:, 2:]
-                screen_smpl_vtx = screen_smpl_vtx.astype(np.int32)
-                dbg = img.copy()
-                for uv in screen_smpl_vtx:
-                    dbg[uv[1], uv[0], :] = 1
-                imageio.imsave("../debug/dbg.png", dbg)
-                imageio.imsave("../debug/img.png", img)
-
-                K = np.array(self.cams["K"][cam_ind])
-                screen_smpl_vtx = np.dot(smpl_vtx_human2.copy(), K.T)
-                screen_smpl_vtx = screen_smpl_vtx[:, :2] / screen_smpl_vtx[:, 2:]
-                screen_smpl_vtx = screen_smpl_vtx.astype(np.int32)
-                dbg = img.copy()
-                for uv in screen_smpl_vtx:
-                    dbg[uv[1], uv[0]] = 1
-                imageio.imsave("../debug/dbg2.png", dbg)
-                print()
         self.beta = np.array(smpl_beta_list).mean(0)
 
         return
@@ -260,9 +174,3 @@ class Dataset(Dataset):
         viz_id = f"video{self.video_name}_dataidx{index}"
         meta_info["viz_id"] = viz_id
         return ret, meta_info
-
-
-if __name__ == "__main__":
-    dataset = Dataset(data_root="../data/zju-mocap")
-    ret = dataset[0]
-    print(ret)
