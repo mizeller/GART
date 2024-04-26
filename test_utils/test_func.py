@@ -5,9 +5,7 @@ sys.path.append(osp.dirname(osp.abspath(__file__)))
 
 import torch
 import numpy as np
-from eval_utils_instant_avatar import Evaluator as EvalAvatar
 from eval_utils_instant_nvr import Evaluator as EvalNVR
-from eval_utils_instant_avatar_brightness import Evaluator as EvalAvatarBrightness
 
 from lib_render.gauspl_renderer import render_cam_pcl
 import cv2, glob
@@ -17,15 +15,8 @@ from lib_data.zju_mocap import Dataset as ZJUDataset, get_batch_sampler
 import logging
 
 
-def get_evaluator(mode, device):
-    if mode == "avatar":
-        evaluator = EvalAvatar()
-    elif mode == "nvr":
-        evaluator = EvalNVR()
-    elif mode == "avatar_brightness":
-        evaluator = EvalAvatarBrightness()
-    else:
-        raise NotImplementedError()
+def _get_evaluator(mode, device):
+    evaluator = EvalNVR()
     evaluator = evaluator.to(device)
     evaluator.eval()
     return evaluator
@@ -54,7 +45,7 @@ def test(
     )
     bg = [0.0, 0.0, 0.0]  # zju use black background
 
-    evaluator = get_evaluator(eval_mode, device)
+    evaluator = _get_evaluator(eval_mode, device)
 
     _save_eval_maps(
         solver.log_dir,
@@ -213,19 +204,9 @@ def _evaluate_dir(evaluator, log_dir, dir_name="test", device=torch.device("cuda
     imgs = [cv2.imread(fn) for fn in glob.glob(f"{osp.join(log_dir, dir_name)}/*.png")]
     imgs = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in imgs]
     imgs = [torch.tensor(img).float() / 255.0 for img in imgs]
-
     evaluator = evaluator.to(device)
     evaluator.eval()
-
-    if isinstance(evaluator, EvalAvatar):
-        eval_mode = "instant-avatar"
-    elif isinstance(evaluator, EvalNVR):
-        eval_mode = "instant-nvr"
-    elif isinstance(evaluator, EvalAvatarBrightness):
-        eval_mode = "instant-avatar-brightness"
-    else:
-        eval_mode = "unknown"
-
+    eval_mode = "instant-nvr"
     H, W = imgs[0].shape[:2]
     logging.info(f"Image size: {H}x{W}")
     W //= 3
@@ -271,15 +252,3 @@ def _evaluate_dir(evaluator, log_dir, dir_name="test", device=torch.device("cuda
     }
     np.save(osp.join(log_dir, f"{dir_name}_{eval_mode}.npy"), metrics)
     return ret
-
-
-if __name__ == "__main__":
-    # debug for brightness eval
-    evaluator = EvalAvatarBrightness()
-    evaluator.to(torch.device("cuda:0"))
-    evaluator.eval()
-    _evaluate_dir(
-        evaluator,
-        "./logs/exmaple/1_seq=shiba_prof=dog_data_official=dog_demo/",
-        "test_tto",
-    )

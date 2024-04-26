@@ -11,10 +11,7 @@ from smplx.smplx import SMPLLayer
 from smplx.smplx.lbs import batch_rigid_transform
 from voxel_deformer import VoxelDeformer
 
-from pytorch3d.transforms import (
-    matrix_to_axis_angle,
-    axis_angle_to_matrix,
-)
+from pytorch3d.transforms import axis_angle_to_matrix
 from model_utils import get_predefined_human_rest_pose
 
 
@@ -77,19 +74,6 @@ class SMPLTemplate(nn.Module):
         faces = self._template_layer.faces_tensor
         return v_init, faces
 
-    def get_rot_action(self, axis_angle):
-        # apply this action to canonical additional bones
-        # axis_angle: B,3
-        assert axis_angle.ndim == 2 and axis_angle.shape[-1] == 3
-        B = len(axis_angle)
-        R = axis_angle_to_matrix(axis_angle)  # B,3,3
-        I = torch.eye(3).to(R)[None].expand(B, -1, -1)  # B,3,3
-        t0 = self.j0_t[None].expand(B, -1)  # B,3
-        T = torch.eye(4).to(R)[None].expand(B, -1, -1)  # B,4,4
-        T[:, :3, :3] = R
-        T[:, :3, 3] = torch.einsum("bij, bj -> bi", I - R, t0)
-        return T  # B,4,4
-
     def forward(self, theta=None, xyz_canonical=None):
         # skinning
         if theta is None:
@@ -112,42 +96,3 @@ class SMPLTemplate(nn.Module):
         else:
             W = self.voxel_deformer(xyz_canonical)  # B,N,24+K
         return W, A
-
-
-if __name__ == "__main__":
-    from transforms3d.euler import euler2mat
-
-    template = SMPLTemplate(
-        smpl_model_path="../../data/smpl_model/SMPL_NEUTRAL.pkl",
-        init_beta=None,
-        cano_pose_type="da_pose",
-        voxel_deformer_res=32,
-    )
-
-    xyz_canonical = torch.rand(1, 6890, 3)
-
-    pose0 = torch.rand(1, 24, 3)
-    pose0[0, 0] = 0.0
-
-    _, A0 = template(pose0, xyz_canonical)
-    A0 = A0[0]
-
-    R0 = axis_angle_to_matrix(pose0[0, 0])
-    dR = torch.from_numpy(euler2mat(np.pi / 4, np.pi / 4, np.pi / 4, "syxz")).float()
-    R1 = dR @ R0
-
-    pose1 = pose0.clone()
-    pose1[0, 0] = matrix_to_axis_angle(R1[None])[0]
-    _, A1 = template(pose1, xyz_canonical)
-    A1 = A1[0]
-
-    action = template.get_rot_action(matrix_to_axis_angle(dR[None]))
-
-    for i in range(len(A0)):
-        _A0, _A1 = A0[i], A1[i]
-        _A0_inv = torch.inverse(_A0)
-        dA = _A1 @ _A0_inv
-        print(abs(dA - action).max())
-        # print(dA)
-
-    print()

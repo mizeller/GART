@@ -7,6 +7,10 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 import numpy as np
 import imageio
+import logging
+import time
+import random
+import math
 import torch
 
 from lib_gart.model import GaussianTemplateModel
@@ -14,7 +18,6 @@ from lib_gart.model_utils import transform_mu_frame
 
 from lib_gart.optim_utils import *
 
-from lib_guidance.camera_sampling import sample_camera, fov2K, opencv2blender
 from lib_render.gauspl_renderer import render_cam_pcl
 
 from utils.viz import viz_render
@@ -23,10 +26,157 @@ from utils.ssim import ssim
 from datetime import datetime
 from utils.misc import seed_everything, HostnameFilter, get_bbox
 
-import logging
-import time
 
 from viz_utils import viz_spinning
+
+
+# camera sampling (previously in /lib_guidance/camera_sampling.py)
+def sample_camera(
+    global_step=1,
+    n_view=4,
+    real_batch_size=1,
+    random_azimuth_range=[-180.0, 180.0],
+    random_elevation_range=[0.0, 30.0],
+    eval_elevation_deg=15,
+    camera_distance_range=[0.8, 1.0],  # relative
+    fovy_range=[15, 60],
+    zoom_range=[1.0, 1.0],
+    progressive_until=0,
+    relative_radius=True,
+):
+
+    # ! from uncond.py
+    # ThreeStudio has progressive increase of camera poses, from eval to random
+    r = min(1.0, global_step / (progressive_until + 1))
+    elevation_range = [
+        (1 - r) * eval_elevation_deg + r * random_elevation_range[0],
+        (1 - r) * eval_elevation_deg + r * random_elevation_range[1],
+    ]
+    azimuth_range = [
+        (1 - r) * 0.0 + r * random_azimuth_range[0],
+        (1 - r) * 0.0 + r * random_azimuth_range[1],
+    ]
+
+    # sample elevation angles
+    if random.random() < 0.5:
+        # sample elevation angles uniformly with a probability 0.5 (biased towards poles)
+        elevation_deg = (
+            torch.rand(real_batch_size) * (elevation_range[1] - elevation_range[0])
+            + elevation_range[0]
+        ).repeat_interleave(n_view, dim=0)
+        elevation = elevation_deg * math.pi / 180
+    else:
+        # otherwise sample uniformly on sphere
+        elevation_range_percent = [
+            (elevation_range[0] + 90.0) / 180.0,
+            (elevation_range[1] + 90.0) / 180.0,
+        ]
+        # inverse transform sampling
+        elevation = torch.asin(
+            2
+            * (
+                torch.rand(real_batch_size)
+                * (elevation_range_percent[1] - elevation_range_percent[0])
+                + elevation_range_percent[0]
+            )
+            - 1.0
+        ).repeat_interleave(n_view, dim=0)
+        elevation_deg = elevation / math.pi * 180.0
+
+    # sample azimuth angles from a uniform distribution bounded by azimuth_range
+    # ensures sampled azimuth angles in a batch cover the whole range
+    azimuth_deg = (
+        torch.rand(real_batch_size).reshape(-1, 1) + torch.arange(n_view).reshape(1, -1)
+    ).reshape(-1) / n_view * (azimuth_range[1] - azimuth_range[0]) + azimuth_range[0]
+    azimuth = azimuth_deg * math.pi / 180
+
+    ######## Different from original ########
+    # sample fovs from a uniform distribution bounded by fov_range
+    fovy_deg = (
+        torch.rand(real_batch_size) * (fovy_range[1] - fovy_range[0]) + fovy_range[0]
+    ).repeat_interleave(n_view, dim=0)
+    fovy = fovy_deg * math.pi / 180
+
+    # sample distances from a uniform distribution bounded by distance_range
+    camera_distances = (
+        torch.rand(real_batch_size)
+        * (camera_distance_range[1] - camera_distance_range[0])
+        + camera_distance_range[0]
+    ).repeat_interleave(n_view, dim=0)
+    if relative_radius:
+        scale = 1 / torch.tan(0.5 * fovy)
+        camera_distances = scale * camera_distances
+
+    # zoom in by decreasing fov after camera distance is fixed
+    zoom = (
+        torch.rand(real_batch_size) * (zoom_range[1] - zoom_range[0]) + zoom_range[0]
+    ).repeat_interleave(n_view, dim=0)
+    fovy = fovy * zoom
+    fovy_deg = fovy_deg * zoom
+    ###########################################
+
+    # convert spherical coordinates to cartesian coordinates
+    # right hand coordinate system, x back, y right, z up
+    # elevation in (-90, 90), azimuth from +x to +y in (-180, 180)
+    camera_positions = torch.stack(
+        [
+            camera_distances * torch.cos(elevation) * torch.cos(azimuth),
+            camera_distances * torch.cos(elevation) * torch.sin(azimuth),
+            camera_distances * torch.sin(elevation),
+        ],
+        dim=-1,
+    )
+
+    azimuth, elevation
+    # build opencv camera
+    z = -torch.stack(
+        [
+            torch.cos(elevation) * torch.cos(azimuth),
+            torch.cos(elevation) * torch.sin(azimuth),
+            torch.sin(elevation),
+        ],
+        -1,
+    )  # nview, 3
+    # up is 0,0,1
+    x = torch.cross(
+        z, torch.tensor([0.0, 0.0, 1.0], device=z.device).repeat(n_view, 1), -1
+    )
+    y = torch.cross(z, x, -1)
+
+    R_wc = torch.stack([x, y, z], dim=2)  # nview, 3, 3, col is basis
+    t_wc = camera_positions
+
+    T_wc = torch.eye(4, device=R_wc.device).repeat(n_view, 1, 1)
+    T_wc[:, :3, :3] = R_wc
+    T_wc[:, :3, 3] = t_wc
+
+    return T_wc, fovy_deg  # B,4,4, B
+
+
+def opencv2blender(T):
+    ret = T.clone()
+    # y,z are negative
+    ret[:, :, 1] *= -1
+    ret[:, :, 2] *= -1
+    return ret
+
+
+def fov2K(fov=90, H=256, W=256):
+    if isinstance(fov, torch.Tensor):
+        f = H / (2 * torch.tan(fov / 2 * np.pi / 180))
+        K = torch.eye(3).repeat(fov.shape[0], 1, 1).to(fov)
+        K[:, 0, 0], K[:, 0, 2] = f, W / 2.0
+        K[:, 1, 1], K[:, 1, 2] = f, H / 2.0
+        return K.clone()
+    else:
+        f = H / (2 * np.tan(fov / 2 * np.pi / 180))
+        K = np.eye(3)
+        K[0, 0], K[0, 2] = f, W / 2.0
+        K[1, 1], K[1, 2] = f, H / 2.0
+        return K.copy()
+
+
+########################################
 
 
 def create_log(log_dir, name, debug=False):
@@ -175,7 +325,7 @@ class TGFitter:
             max_steps=self.TOTAL_steps,
         )
 
-        init_step = 1500 #1000 #500 #2000 #300 #2000
+        init_step = 1500  # 1000 #500 #2000 #300 #2000
         w_dc_scheduler_func = get_expon_lr_func_interval(
             init_step=init_step,
             final_step=self.TOTAL_steps,
@@ -218,7 +368,7 @@ class TGFitter:
         # * prepare pose optimizer list and the schedulers
         scheduler_dict, pose_optim_l = {}, []
         if data_provider is not None:
-            start_step =1500 #500 #1000
+            start_step = 1500  # 500 #1000
             end_step = self.TOTAL_steps
             pose_optim_l.extend(
                 [
@@ -745,7 +895,7 @@ class TGFitter:
 
             if (
                 step > self.DENSIFY_START
-                and step < 2500 #10000 #15000
+                and step < 2500  # 10000 #15000
                 and step % self.DENSIFY_INTERVAL == 0
             ):
                 N_old = model.N
@@ -808,12 +958,8 @@ class TGFitter:
                 )
 
                 can_pose = model.template.canonical_pose.detach()
-                if self.mode == "human":
-                    can_pose[0] = self.viz_base_R.to(can_pose.device)
-                    can_pose = matrix_to_axis_angle(can_pose)[None]
-                else:
-                    can_pose[:3] = matrix_to_axis_angle(self.viz_base_R[None])[0]
-                    can_pose = can_pose[None]
+                can_pose[0] = self.viz_base_R.to(can_pose.device)
+                can_pose = matrix_to_axis_angle(can_pose)[None]
                 can_trans = torch.zeros(len(can_pose), 3).to(can_pose)
                 can_trans[:, -1] = 3.0
                 viz_H, viz_W = 512, 512

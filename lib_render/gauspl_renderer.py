@@ -58,15 +58,15 @@ def render_cam_pcl(
         new_W, new_H = W, H
 
     # Set up rasterization configuration
-    FoVx = focal2fov(CAM_K[0, 0], new_W)
-    FoVy = focal2fov(CAM_K[1, 1], new_H)
+    FoVx = _focal2fov(CAM_K[0, 0], new_W)
+    FoVy = _focal2fov(CAM_K[1, 1], new_H)
     tanfovx = math.tan(FoVx * 0.5)
     tanfovy = math.tan(FoVy * 0.5)
 
     # TODO: Check dynamic gaussian repos and original gaussian repo, they use projection matrix to handle non-centered K, not using this stupid padding like me
-    viewmatrix = torch.from_numpy(getWorld2View2(np.eye(3), np.zeros(3)).transpose(0, 1)).to(device)
+    viewmatrix = torch.from_numpy(_getWorld2View2(np.eye(3), np.zeros(3)).transpose(0, 1)).to(device)
     projection_matrix = (
-        getProjectionMatrix(znear=0.01, zfar=1.0, fovX=FoVx, fovY=FoVy).transpose(0, 1).to(device)
+        _getProjectionMatrix(znear=0.01, zfar=1.0, fovX=FoVx, fovY=FoVy).transpose(0, 1).to(device)
     )
     full_proj_transform = (viewmatrix.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
     camera_center = viewmatrix.inverse()[3, :3]
@@ -96,7 +96,7 @@ def render_cam_pcl(
     scales = None
     rotations = None
     # JH
-    cov3D_precomp = strip_lowerdiag(actual_covariance)
+    cov3D_precomp = _strip_lowerdiag(actual_covariance)
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -160,11 +160,11 @@ def render_cam_pcl(
     return ret
 
 
-def focal2fov(focal, pixels):
+def _focal2fov(focal, pixels):
     return 2 * math.atan(pixels / (2 * focal))
 
 
-def getWorld2View2(R, t, translate=np.array([0.0, 0.0, 0.0]), scale=1.0):
+def _getWorld2View2(R, t, translate=np.array([0.0, 0.0, 0.0]), scale=1.0):
     Rt = np.zeros((4, 4))
     Rt[:3, :3] = R.transpose()
     Rt[:3, 3] = t
@@ -178,7 +178,7 @@ def getWorld2View2(R, t, translate=np.array([0.0, 0.0, 0.0]), scale=1.0):
     return np.float32(Rt)
 
 
-def getProjectionMatrix(znear, zfar, fovX, fovY):
+def _getProjectionMatrix(znear, zfar, fovX, fovY):
     tanHalfFovY = math.tan((fovY / 2))
     tanHalfFovX = math.tan((fovX / 2))
 
@@ -201,7 +201,7 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     return P
 
 
-def strip_lowerdiag(L):
+def _strip_lowerdiag(L):
     uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
 
     uncertainty[:, 0] = L[:, 0, 0]
