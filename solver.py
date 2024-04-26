@@ -414,191 +414,6 @@ class TGFitter:
         optimizer_smpl = torch.optim.Adam(pose_optim_l)
         return optimizer_smpl, scheduler_dict
 
-    def _guide_step(
-        self,
-        model,
-        data_pack,
-        act_sph_ord,
-        guidance,
-        step_ratio,
-        guidance_scale,
-        head_prob=0.3,
-        hand_prob=0.0,
-        can_prob=0.0,
-    ):
-        mvdream_flag = isinstance(guidance, MVDream)
-        if mvdream_flag:
-            nview = 4
-        else:
-            nview = 1
-        bg = np.random.uniform(0.0, 1.0, size=3)
-        H, W = 256, 256
-
-        random_seed = np.random.uniform(0.0, 1.0)
-        canonical_pose_flag = random_seed < can_prob
-
-        random_seed = np.random.uniform(0.0, 1.0)
-        head_flag = random_seed < head_prob and mvdream_flag
-        hand_flag = (
-            random_seed < head_prob + hand_prob and mvdream_flag and not head_flag
-        )
-
-        if hand_flag:
-            canonical_pose_flag = True
-
-        pose, trans_zero = data_pack
-        trans_zero = torch.zeros_like(trans_zero).to(self.device)
-        if canonical_pose_flag:
-            _pose = model.template.canonical_pose.detach()
-            pose = matrix_to_axis_angle(_pose)[None]
-        else:
-            pose = pose.to(self.device)
-        pose_root = self.reg_base_R_global[None, None]
-        pose = torch.cat([pose_root, pose[:, 1:]], dim=1)
-
-        # sample camera
-        T_ocam, fovy_deg = sample_camera(
-            random_elevation_range=[-30, 60],
-            camera_distance_range=[1.1, 1.3],
-            relative_radius=True,
-            n_view=nview,
-        )
-        T_ocam = T_ocam.to(self.device).float()
-        T_camo = torch.inverse(T_ocam)
-        K = fov2K(fovy_deg.to(self.device).float(), H, W)
-
-        def _inner_step(guidance, T_camo, K, pose):
-            # this is a pose in canonical ThreeStudio frame, x is forward, y is leftward, z is upward
-            mu, frame, s, o, sph, additional_ret = model(
-                pose,
-                trans_zero,
-                additional_dict={},
-                active_sph_order=act_sph_ord,
-            )
-            # convert the mu and frame to camera frame
-            mu, frame = transform_mu_frame(mu, frame, T_camo)
-            render_pkg_list = []
-            for vid in range(nview):
-                # this is four view inherited from MVDream
-                render_pkg = render_cam_pcl(
-                    mu[vid],
-                    frame[vid],
-                    s[0],
-                    o[0],
-                    sph[0],
-                    H,
-                    W,
-                    K[vid],
-                    False,
-                    act_sph_ord,
-                    bg,
-                )
-                render_pkg_list.append(render_pkg)
-
-            rendered_list = [pkg["rgb"] for pkg in render_pkg_list]
-            rendered_list = torch.stack(rendered_list, dim=0)  # NVIEW,3,H,W
-            if mvdream_flag:
-                if guidance.dtype == torch.float16:
-                    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                        loss = guidance.train_step(
-                            rendered_list,
-                            opencv2blender(T_ocam),
-                            step_ratio=step_ratio,
-                            guidance_scale=guidance_scale,
-                        )
-                else:
-                    loss = guidance.train_step(
-                        rendered_list,
-                        opencv2blender(T_ocam),
-                        step_ratio=step_ratio,
-                        guidance_scale=guidance_scale,
-                    )
-            else:
-                loss = guidance.train_step(
-                    rendered_list,
-                    step_ratio=step_ratio,
-                    guidance_scale=guidance_scale,
-                )
-            return loss, render_pkg_list
-
-        if head_flag:
-            old_pos_embeds = guidance.pos_embeddings.clone()
-            prp = guidance.prompts[0].split(",")[0]
-            local_prompt = "Part of a photo, the Head of " + prp
-            new_pos_embeds = guidance._encode_text([local_prompt])
-            guidance.pos_embeddings = new_pos_embeds
-
-            pose_rot = axis_angle_to_matrix(pose)
-            can_template_output = model.template._template_layer(
-                body_pose=pose_rot[:, 1:], global_orient=pose_rot[:, 0]
-            )
-            joint_xyz = can_template_output.joints[0]
-            head_xyz = joint_xyz[15]
-            T_ocam, fovy_deg = sample_camera(
-                random_elevation_range=[-10.0, 20.0],
-                camera_distance_range=[0.25, 0.25],
-                relative_radius=True,
-                # random_azimuth_range=[0.0,0.0],
-                fovy_range=[15, 60],
-                zoom_range=[1.0, 1.0],
-            )
-            T_ocam[:, :3, -1] += head_xyz[None].to(T_ocam.device)
-            T_ocam = T_ocam.to(self.device).float()
-            T_camo = torch.inverse(T_ocam)
-            K = fov2K(fovy_deg.to(self.device).float(), H, W)
-            loss, render_pkg_list = _inner_step(guidance, T_camo, K, pose)
-
-            # viz_rgb = [it["rgb"].permute(1,2,0) for it in render_pkg_list_head]
-            # viz_rgb = torch.cat(viz_rgb, dim=1)
-            # imageio.imsave("./debug/viz_head.png", viz_rgb.detach().cpu().numpy())
-            guidance.pos_embeddings = old_pos_embeds
-        elif hand_flag:
-            random_seed = np.random.uniform(0.0, 1.0)
-            left_hand_flag = random_seed < 0.5
-            if left_hand_flag:
-                joint_id = 22
-                hand_str = "left"
-            else:
-                joint_id = 23
-                hand_str = "right"
-
-            old_pos_embeds = guidance.pos_embeddings.clone()
-            prp = guidance.prompts[0].split(",")[0]
-            local_prompt = f"Part of a photo, zoomed in, the {hand_str} hand of " + prp
-            new_pos_embeds = guidance._encode_text([local_prompt])
-            guidance.pos_embeddings = new_pos_embeds
-
-            pose_rot = axis_angle_to_matrix(pose)
-            can_template_output = model.template._template_layer(
-                body_pose=pose_rot[:, 1:], global_orient=pose_rot[:, 0]
-            )
-            joint_xyz = can_template_output.joints[0]
-            head_xyz = joint_xyz[joint_id]
-
-            T_ocam, fovy_deg = sample_camera(
-                random_elevation_range=[-30.0, 30.0],
-                camera_distance_range=[0.25, 0.25],
-                relative_radius=True,
-                fovy_range=[15, 60],
-                zoom_range=[1.0, 1.0],
-                random_azimuth_range=(
-                    [-180.0 - 30, 0 + 30] if joint_id == 23 else [0 - 30, 180 + 30]
-                ),
-            )
-            T_ocam[:, :3, -1] += head_xyz[None].to(T_ocam.device)
-            T_ocam = T_ocam.to(self.device).float()
-            T_camo = torch.inverse(T_ocam)
-            K = fov2K(fovy_deg.to(self.device).float(), H, W)
-            loss, render_pkg_list = _inner_step(guidance, T_camo, K, pose)
-
-            # viz_rgb = [it["rgb"].permute(1, 2, 0) for it in render_pkg_list]
-            # viz_rgb = torch.cat(viz_rgb, dim=1)
-            # imageio.imsave("./debug/viz_hand.png", viz_rgb.detach().cpu().numpy())
-            guidance.pos_embeddings = old_pos_embeds
-        else:
-            loss, render_pkg_list = _inner_step(guidance, T_camo, K, pose)
-        return loss, render_pkg_list
-
     def _fit_step(
         self,
         model,
@@ -703,7 +518,7 @@ class TGFitter:
             },
         )
 
-    def compute_reg3D(self, model: GaussianTemplateModel):
+    def _compute_reg3D(self, model: GaussianTemplateModel):
         K = 6
         (
             q_std,
@@ -765,29 +580,11 @@ class TGFitter:
         }
         return reg_loss, details
 
-    def add_scalar(self, *args, **kwargs):
+    def _add_scalar(self, *args, **kwargs):
         if self.FAST_TRAINING:
             return
         self.writer.add_scalar(*args, **kwargs)
         return
-
-    def get_sd_step_ratio(self, step):
-        start = 0
-        end = self.TOTAL_steps
-        len = end - start
-        if (step + 1) <= start:
-            return 1.0 / len
-        if (step + 1) >= end:
-            return 1.0
-        ratio = min(1, (step - start + 1) / len)
-        ratio = max(1.0 / len, ratio)
-        return ratio
-
-    def get_guidance_scale(self, step):
-        scale = self.GUIDANCE_SCALE
-        end_scale = scale
-        ret = scale + (end_scale - scale) * (step / self.TOTAL_steps)
-        return ret
 
     def run(
         self,
@@ -859,7 +656,7 @@ class TGFitter:
             )
             loss = loss + loss_recon
             for k, v in loss_dict.items():
-                self.add_scalar(k, v.detach(), step)
+                self._add_scalar(k, v.detach(), step)
 
             if (
                 last_reset_step < 0
@@ -867,14 +664,14 @@ class TGFitter:
                 and step > 0
             ):
                 loss = loss + self.LAMBDA_MASK * loss_mask
-                self.add_scalar("loss_mask", loss_mask.detach(), step)
-            self.add_scalar("loss", loss.detach(), step)
+                self._add_scalar("loss_mask", loss_mask.detach(), step)
+            self._add_scalar("loss", loss.detach(), step)
 
             # * Reg Terms
-            reg_loss, reg_details = self.compute_reg3D(model)
+            reg_loss, reg_details = self._compute_reg3D(model)
             loss = reg_loss + loss
             for k, v in reg_details.items():
-                self.add_scalar(k, v.detach(), step)
+                self._add_scalar(k, v.detach(), step)
 
             loss.backward()
             optimizer.step()
@@ -882,7 +679,7 @@ class TGFitter:
             if step > 1500:
                 optimizer_pose.step()
 
-            self.add_scalar("N", model.N, step)
+            self._add_scalar("N", model.N, step)
 
             # * Gaussian Control
             if step > self.DENSIFY_START:
