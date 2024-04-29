@@ -1,7 +1,7 @@
 from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
 from torch.utils.tensorboard import SummaryWriter
 from transforms3d.euler import euler2mat
-import os, os.path as osp, shutil
+import os, os.path as osp
 from matplotlib import pyplot as plt
 from omegaconf import OmegaConf
 from datetime import datetime
@@ -23,6 +23,10 @@ from lib_gart.model import GaussianTemplateModel
 from lib_gart.templates import SMPLTemplate
 from lib_gart.smplx.smplx import SMPLLayer
 from lib_gart.optim_utils import *
+
+# import for data loader
+from lib_data.zju_mocap import Dataset as ZJUDataset
+from lib_data.data_provider import RealDataOptimizablePoseProviderPose
 
 # other imports from local files...
 from utils.misc import seed_everything, HostnameFilter, get_bbox
@@ -297,24 +301,23 @@ def create_log(log_dir):
 
 
 class TGFitter:
-    def __init__(
-        self,
-        log_dir,
-        profile_fn="./profiles/zju_3m.yaml",
-        device=torch.device("cuda:0"),
-        debug: bool = True,
-    ):
+    def __init__(self, log_dir):
         """the __init__ method basically just reads the configs and sets up the logging; really not much going on here"""
         self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
 
-        self.profile_fn = profile_fn
-        shutil.copy(profile_fn, osp.join(self.log_dir, osp.basename(profile_fn)))
-        self.mode = "human"
-        self.device = device
+        # get dataset
+        self.data_provider = RealDataOptimizablePoseProviderPose(
+            dataset=ZJUDataset(),
+            balance=False,
+        )
+
+        # set attributes (defined in zju_3m.yaml)
+        self.cfg = "./profiles/zju_3m.yaml"
+        self.device = torch.device("cuda:0")
 
         # assign vars in zju_3m.yaml to self attrs
-        for k, v in OmegaConf.load(profile_fn).items():
+        for k, v in OmegaConf.load(self.cfg).items():
             setattr(self, k, v)
 
         # prepare base R
@@ -440,27 +443,26 @@ class TGFitter:
             sph_rest_scheduler_func,
         )
 
-    def _get_pose_optimizer(self, data_provider):
-
+    def _get_pose_optimizer(self):
         # * prepare pose optimizer list and the schedulers
         scheduler_dict, pose_optim_l = {}, []
-        if data_provider is not None:
+        if self.data_provider is not None:
             start_step = 1500  # 500 #1000
             end_step = self.TOTAL_steps
             pose_optim_l.extend(
                 [
                     {
-                        "params": data_provider.pose_base_list,
+                        "params": self.data_provider.pose_base_list,
                         "lr": self.POSE_R_BASE_LR,
                         "name": "pose_base",
                     },
                     {
-                        "params": data_provider.pose_rest_list,
+                        "params": self.data_provider.pose_rest_list,
                         "lr": self.POSE_R_REST_LR,
                         "name": "pose_rest",
                     },
                     {
-                        "params": data_provider.global_trans_list,
+                        "params": self.data_provider.global_trans_list,
                         "lr": self.POSE_T_LR,
                         "name": "pose_trans",
                     },
@@ -793,7 +795,6 @@ class TGFitter:
         )
         pred = render_pkg["rgb"].permute(1, 2, 0).detach().cpu().numpy()
         imageio.imsave(osp.join(self.log_dir, "fps_eval_sample.png"), pred)
-
         logging.info("Start FPS test...")
         start_t = time.time()
 
@@ -820,11 +821,10 @@ class TGFitter:
 
     def run(
         self,
-        data_provider=None,
     ):
         torch.cuda.empty_cache()
 
-        init_beta = data_provider.betas
+        init_beta = self.data_provider.betas
 
         (
             model,
@@ -836,7 +836,7 @@ class TGFitter:
             sph_rest_scheduler_func,
         ) = self._get_model_optimizer(betas=init_beta)
 
-        optimizer_pose, scheduler_pose = self._get_pose_optimizer(data_provider)
+        optimizer_pose, scheduler_pose = self._get_pose_optimizer()
 
         # * Optimization Loop
         stat_n_list = []
@@ -868,7 +868,7 @@ class TGFitter:
 
             loss = 0.0
 
-            real_data_pack = data_provider(self.N_POSES_PER_STEP, continuous=False)
+            real_data_pack = self.data_provider(self.N_POSES_PER_STEP)
 
             (
                 loss_recon,
@@ -977,8 +977,8 @@ class TGFitter:
                     model,
                     torch.cat([pose_base, pose_rest], 1)[:1],
                     global_trans[:1],
-                    data_provider.H,
-                    data_provider.W,
+                    self.data_provider.H,
+                    self.data_provider.W,
                     K[0],
                     save_path=f"{self.log_dir}/viz_step/spinning_{step}.gif",
                     time_index=time_index,
@@ -1039,7 +1039,7 @@ class TGFitter:
         logging.info(f"Saving model to {ckpt_path}...")
         torch.save(model.state_dict(), ckpt_path)
         pose_path = f"{self.log_dir}/training_poses.pth"
-        torch.save(data_provider.state_dict(), pose_path)
+        torch.save(self.data_provider.state_dict(), pose_path)
         model.to("cpu")
 
         # * stat
@@ -1053,4 +1053,4 @@ class TGFitter:
 
         # move the model back to the device
         model.to(self.device)
-        return model, data_provider
+        return model

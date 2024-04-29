@@ -48,11 +48,6 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         self.K_list = self.K_list.to(self.device)
         self.betas = self.betas.to(self.device)
 
-    # TODO: remove laters
-    # @property
-    # def total_t(self):
-    #     return len(self.rgb_list)
-
     @property
     def pose_diff(self):
         optim_pose = self.pose_list
