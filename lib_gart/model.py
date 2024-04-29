@@ -7,7 +7,7 @@ from torch import nn
 from optim_utils import *
 from init_helpers import get_on_mesh_init_geo_values
 import logging
-from lib_gart.templates import SMPLTemplate
+
 from pytorch3d.transforms import quaternion_to_matrix
 from model_utils import sph_order2nfeat
 from pytorch3d.ops import knn_points
@@ -21,7 +21,7 @@ class GaussianTemplateModel(nn.Module):
         ##################################
         # attr config
         w_correction_flag=True,
-        w_rest_dim=0,  # additional skinnign weight
+        w_rest_dim=0,  # additional skinning weight
         f_localcode_dim=0,
         max_sph_order=0,
         w_memory_type="point",
@@ -34,23 +34,10 @@ class GaussianTemplateModel(nn.Module):
         onmesh_init_subdivide_num=0,
         onmesh_init_scale_factor=1.0,
         onmesh_init_thickness_factor=0.5,
-        # near mesh init params
-        scale_init_value=0.01,  # the init value of scale
-        nearmesh_init_num=10000,
-        nearmesh_init_std=0.1,
         ##################################
     ) -> None:
         super().__init__()
-
-        if template is None:
-            template = SMPLTemplate(
-                smpl_model_path="data/smpl_model/SMPL_NEUTRAL.pkl",
-                init_beta=betas,
-                cano_pose_type="da_pose",
-                voxel_deformer_res=64,
-            )
-
-        self.template = template  # SMPLTemplate
+        self.template = template
         self.num_bones = template.voxel_deformer.num_bones
 
         self.max_scale = max_scale

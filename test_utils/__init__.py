@@ -1,1 +1,0 @@
-from .test_func import test

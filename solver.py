@@ -1,9 +1,10 @@
-from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
+from pytorch3d.transforms import matrix_to_axis_angle, axis_angle_to_matrix
 from torch.utils.tensorboard import SummaryWriter
 from transforms3d.euler import euler2mat
 import os, os.path as osp, shutil
 from matplotlib import pyplot as plt
 from omegaconf import OmegaConf
+from datetime import datetime
 from tqdm import tqdm
 import numpy as np
 import imageio
@@ -12,22 +13,113 @@ import time
 import random
 import math
 import torch
+from torch import nn
 
+# imports from GART library
+from lib_gart.model_utils import get_predefined_human_rest_pose
+from lib_gart.smplx.smplx.lbs import batch_rigid_transform
+from lib_gart.voxel_deformer import VoxelDeformer
 from lib_gart.model import GaussianTemplateModel
-from lib_gart.model_utils import transform_mu_frame
-
+from lib_gart.templates import SMPLTemplate
+from lib_gart.smplx.smplx import SMPLLayer
 from lib_gart.optim_utils import *
 
+# other imports from local files...
+from utils.misc import seed_everything, HostnameFilter, get_bbox
 from lib_render.gauspl_renderer import render_cam_pcl
-
+from utils.viz_utils import viz_spinning
 from utils.viz import viz_render
 from utils.ssim import ssim
 
-from datetime import datetime
-from utils.misc import seed_everything, HostnameFilter, get_bbox
+########################################
+# previously in lib_gart/model.py
+# A template only handle the query of the
 
 
-from viz_utils import viz_spinning
+class SMPLTemplate(nn.Module):
+    def __init__(self, smpl_model_path, init_beta, cano_pose_type, voxel_deformer_res):
+        super().__init__()
+        self.dim = 24
+        self._template_layer = SMPLLayer(model_path=smpl_model_path)
+
+        if init_beta is None:
+            init_beta = np.zeros(10)
+        init_beta = torch.as_tensor(init_beta, dtype=torch.float32).cpu()
+        self.register_buffer("init_beta", init_beta)
+        self.cano_pose_type = cano_pose_type
+        self.name = "smpl"
+
+        can_pose = get_predefined_human_rest_pose(cano_pose_type)
+        can_pose = axis_angle_to_matrix(torch.cat([torch.zeros(1, 3), can_pose], 0))
+        self.register_buffer("canonical_pose", can_pose)
+
+        init_smpl_output = self._template_layer(
+            betas=init_beta[None],
+            body_pose=can_pose[None, 1:],
+            global_orient=can_pose[None, 0],
+            return_full_pose=True,
+        )
+        J_canonical, A0 = init_smpl_output.J, init_smpl_output.A
+        A0_inv = torch.inverse(A0)
+        self.register_buffer("A0_inv", A0_inv[0])
+        self.register_buffer("J_canonical", J_canonical)
+
+        v_init = init_smpl_output.vertices  # 1,6890,3
+        v_init = v_init[0]
+        W_init = self._template_layer.lbs_weights  # 6890,24
+
+        self.voxel_deformer = VoxelDeformer(
+            vtx=v_init[None],
+            vtx_features=W_init[None],
+            resolution_dhw=[
+                voxel_deformer_res // 4,
+                voxel_deformer_res,
+                voxel_deformer_res,
+            ],
+        )
+
+        # * Important, record first joint position, because the global orientation is rotating using this joint position as center, so we can compute the action on later As
+        j0_t = init_smpl_output.joints[0, 0]
+        self.register_buffer("j0_t", j0_t)
+        return
+
+    def get_init_vf(self):
+        init_smpl_output = self._template_layer(
+            betas=self.init_beta[None],
+            body_pose=self.canonical_pose[None, 1:],
+            global_orient=self.canonical_pose[None, 0],
+            return_full_pose=True,
+        )
+        v_init = init_smpl_output.vertices  # 1,6890,3
+        v_init = v_init[0]
+        faces = self._template_layer.faces_tensor
+        return v_init, faces
+
+    def forward(self, theta=None, xyz_canonical=None):
+        # skinning
+        if theta is None:
+            A = None
+        else:
+            assert (
+                theta.ndim == 3 and theta.shape[-1] == 3
+            ), "pose should have shape Bx24x3, in axis-angle format"
+            nB = len(theta)
+            _, A = batch_rigid_transform(
+                axis_angle_to_matrix(theta),
+                self.J_canonical.expand(nB, -1, -1),
+                self._template_layer.parents,
+            )
+            A = torch.einsum("bnij, njk->bnik", A, self.A0_inv)  # B,24,4,4
+
+        if xyz_canonical is None:
+            # forward theta only
+            W = None
+        else:
+            W = self.voxel_deformer(xyz_canonical)  # B,N,24+K
+        return W, A
+
+
+########################################
 
 
 # camera sampling (previously in /lib_guidance/camera_sampling.py)
@@ -179,35 +271,13 @@ def fov2K(fov=90, H=256, W=256):
 ########################################
 
 
-def create_log(log_dir, name, debug=False):
+def create_log(log_dir):
     os.makedirs(osp.join(log_dir, "viz_step"), exist_ok=True)
-    if debug:  # skip backup when debugging
-        backup_dir = osp.join(log_dir, "backup")
-        os.makedirs(backup_dir, exist_ok=True)
-        shutil.copyfile(__file__, osp.join(backup_dir, osp.basename(__file__)))
-        # shutil.copytree("lib_gart", osp.join(backup_dir, "lib_gart"), dirs_exist_ok=Tru
-        # backup all notebooks
-        os.system(f"cp ./*.ipynb {backup_dir}/")
-
     writer = SummaryWriter(log_dir=log_dir)
-    # also set the logging to print to terminal and the file
-    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    _configure_logging(
-        osp.join(log_dir, f"{current_datetime}.log"), debug=debug, name=name
-    )
-    return writer
-
-
-def _configure_logging(log_path, debug=False, name="default"):
-    """
-    https://github.com/facebookresearch/DeepSDF
-    """
+    # configure logging
     logging.getLogger().handlers.clear()
     logger = logging.getLogger()
-    if debug:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
+    logger.setLevel(logging.INFO)
     logger_handler = logging.StreamHandler()
     logger_handler.addFilter(HostnameFilter())
     formatter = logging.Formatter(
@@ -217,10 +287,13 @@ def _configure_logging(log_path, debug=False, name="default"):
     logger_handler.setFormatter(formatter)
     logger.addHandler(logger_handler)
 
-    file_logger_handler = logging.FileHandler(log_path)
-
+    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    file_logger_handler = logging.FileHandler(
+        osp.join(log_dir, f"{current_datetime}.log")
+    )
     file_logger_handler.setFormatter(formatter)
     logger.addHandler(file_logger_handler)
+    return writer
 
 
 class TGFitter:
@@ -231,6 +304,7 @@ class TGFitter:
         device=torch.device("cuda:0"),
         debug: bool = True,
     ):
+        """the __init__ method basically just reads the configs and sets up the logging; really not much going on here"""
         self.log_dir = log_dir
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -258,12 +332,11 @@ class TGFitter:
             .to(self.device)
         )
 
-        self.writer: SummaryWriter = create_log(
-            self.log_dir, name=osp.basename(self.profile_fn).split(".")[0], debug=debug
-        )
+        self.writer: SummaryWriter = create_log(self.log_dir)
         return
 
     def load_saved_model(self, ckpt_path=None):
+        """load a saved model from a checkpoint path"""
         if ckpt_path is None:
             ckpt_path = osp.join(self.log_dir, "model.pth")
         ret = self._get_model_optimizer(betas=None)
@@ -278,8 +351,16 @@ class TGFitter:
 
     def _get_model_optimizer(self, betas):
         seed_everything(self.SEED)
+
+        template = SMPLTemplate(
+            smpl_model_path="data/smpl_model/SMPL_NEUTRAL.pkl",
+            init_beta=betas,
+            cano_pose_type="da_pose",
+            voxel_deformer_res=64,
+        )
+
         model = GaussianTemplateModel(
-            template=None,
+            template=template,
             betas=betas,
             w_correction_flag=self.W_CORRECTION_FLAG,
             w_rest_dim=0,  # 4 #0 #16
@@ -294,10 +375,6 @@ class TGFitter:
             onmesh_init_subdivide_num=0,
             onmesh_init_scale_factor=1.0,
             onmesh_init_thickness_factor=0.5,
-            # near mesh init
-            nearmesh_init_num=10000,
-            nearmesh_init_std=0.1,  # 0.5
-            scale_init_value=0.01,  # only used for random init
         ).to(self.device)
 
         logging.info(f"Init with {model.N} Gaussians")
@@ -518,7 +595,7 @@ class TGFitter:
             },
         )
 
-    def _compute_reg3D(self, model: GaussianTemplateModel):
+    def _compute_reg3D(self, model):
         K = 6
         (
             q_std,
@@ -585,6 +662,161 @@ class TGFitter:
             return
         self.writer.add_scalar(*args, **kwargs)
         return
+
+    def testtime_pose_optimization(
+        self,
+        data_pack,
+        model,
+        evaluator,
+        pose_base_lr=3e-3,
+        pose_rest_lr=3e-3,
+        trans_lr=3e-3,
+        steps=100,
+        decay_steps=30,
+        decay_factor=0.5,
+        check_every_n_step=5,
+        viz_fn=None,
+    ):
+        # * Like Instant avatar, optimize the smpl pose f
+        # * will optimize all poses in the data_pack
+        torch.cuda.empty_cache()
+        seed_everything(self.SEED)
+        model.eval()  # to get gradients, but never optimized
+        evaluator.eval()
+        gt_rgb, gt_mask, K, pose_b, pose_r, trans = data_pack[:6]
+        pose_b = pose_b.detach().clone()
+        pose_r = pose_r.detach().clone()
+        trans = trans.detach().clone()
+        pose_b.requires_grad_(True)
+        pose_r.requires_grad_(True)
+        trans.requires_grad_(True)
+        gt_rgb, gt_mask = gt_rgb.to(self.device), gt_mask.to(self.device)
+
+        optim_l = [
+            {"params": [pose_b], "lr": pose_base_lr},
+            {"params": [pose_r], "lr": pose_rest_lr},
+            {"params": [trans], "lr": trans_lr},
+        ]
+        optimizer_smpl = torch.optim.SGD(optim_l)
+
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer_smpl, step_size=decay_steps, gamma=decay_factor
+        )
+
+        loss_list, psnr_list, ssim_list, lpips_list = [], [], [], []
+        viz_step_list = []
+        for inner_step in range(steps):
+            # optimize
+            optimizer_smpl.zero_grad()
+            loss_recon, _, rendered_list, _, _, _, _ = self._fit_step(
+                model,
+                [gt_rgb, gt_mask, K, pose_b, pose_r, trans, None],
+                act_sph_ord=model.max_sph_order,
+                random_bg=False,
+                default_bg=[0.0, 0.0, 0.0],
+            )
+            loss = loss_recon
+            loss.backward()
+            optimizer_smpl.step()
+            scheduler.step()
+            loss_list.append(float(loss))
+
+            if (
+                inner_step % check_every_n_step == 0
+                or inner_step == steps - 1
+                and viz_fn is not None
+            ):
+                viz_step_list.append(inner_step)
+                with torch.no_grad():
+                    _check_results = [
+                        evaluator(
+                            rendered_list[0]["rgb"].permute(1, 2, 0)[None],
+                            gt_rgb[0][None],
+                        )
+                    ]
+                psnr = torch.stack([r["psnr"] for r in _check_results]).mean().item()
+                ssim = torch.stack([r["ssim"] for r in _check_results]).mean().item()
+                lpips = torch.stack([r["lpips"] for r in _check_results]).mean().item()
+                psnr_list.append(float(psnr))
+                ssim_list.append(float(ssim))
+                lpips_list.append(float(lpips))
+
+        if viz_fn is not None:
+            os.makedirs(osp.dirname(viz_fn), exist_ok=True)
+            plt.figure(figsize=(16, 4))
+            plt.subplot(1, 4, 1)
+            plt.plot(viz_step_list, psnr_list)
+            plt.title(f"PSNR={psnr_list[-1]}"), plt.grid()
+            plt.subplot(1, 4, 2)
+            plt.plot(viz_step_list, ssim_list)
+            plt.title(f"SSIM={ssim_list[-1]}"), plt.grid()
+            plt.subplot(1, 4, 3)
+            plt.plot(viz_step_list, lpips_list)
+            plt.title(f"LPIPS={lpips_list[-1]}"), plt.grid()
+            plt.subplot(1, 4, 4)
+            plt.plot(loss_list)
+            plt.title(f"Loss={loss_list[-1]}"), plt.grid()
+            plt.yscale("log")
+            plt.tight_layout()
+            plt.savefig(viz_fn)
+            plt.close()
+
+        return (
+            pose_b.detach().clone(),
+            pose_r.detach().clone(),
+            trans.detach().clone(),
+        )
+
+    @torch.no_grad()
+    def eval_fps(self, model, real_data_provider, rounds=1):
+        model.eval()
+        model.cache_for_fast()
+        logging.info(f"Model has {model.N} points.")
+        N_frames = len(real_data_provider.rgb_list)
+        ret = real_data_provider(N_frames)
+        gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = ret
+        pose = torch.cat([pose_base, pose_rest], 1)
+        H, W = gt_rgb.shape[1:3]
+        sph_o = model.max_sph_order
+        logging.info(f"FPS eval using active_sph_order: {sph_o}")
+        # run one iteration to check the output correctness
+        mu, fr, sc, op, sph, additional_ret = model(
+            pose[0:1],
+            global_trans[0:1],
+            additional_dict={},
+            active_sph_order=sph_o,
+            fast=True,
+        )
+        bg = [1.0, 1.0, 1.0]
+        render_pkg = render_cam_pcl(
+            mu[0], fr[0], sc[0], op[0], sph[0], H, W, K[0], False, sph_o, bg
+        )
+        pred = render_pkg["rgb"].permute(1, 2, 0).detach().cpu().numpy()
+        imageio.imsave(osp.join(self.log_dir, "fps_eval_sample.png"), pred)
+
+        logging.info("Start FPS test...")
+        start_t = time.time()
+
+        for j in tqdm(range(int(N_frames * rounds))):
+            i = j % N_frames
+            mu, fr, sc, op, sph, additional_ret = model(
+                pose[i : i + 1],
+                global_trans[i : i + 1],
+                additional_dict={"t": time_index},
+                active_sph_order=sph_o,
+                fast=True,
+            )
+            bg = [1.0, 1.0, 1.0]
+            render_pkg = render_cam_pcl(
+                mu[0], fr[0], sc[0], op[0], sph[0], H, W, K[0], False, sph_o, bg
+            )
+        end_t = time.time()
+
+        fps = (rounds * N_frames) / (end_t - start_t)
+        logging.info(f"FPS: {fps}")
+        with open(osp.join(self.log_dir, "fps.txt"), "w") as f:
+            f.write(f"FPS: {fps}")
+        return fps
 
     def run(
         self,
@@ -818,159 +1050,7 @@ class TGFitter:
         plt.close()
 
         model.summary()
+
+        # move the model back to the device
+        model.to(self.device)
         return model, data_provider
-
-    def testtime_pose_optimization(
-        self,
-        data_pack,
-        model,
-        evaluator,
-        pose_base_lr=3e-3,
-        pose_rest_lr=3e-3,
-        trans_lr=3e-3,
-        steps=100,
-        decay_steps=30,
-        decay_factor=0.5,
-        check_every_n_step=5,
-        viz_fn=None,
-    ):
-        # * Like Instant avatar, optimize the smpl pose f
-        # * will optimize all poses in the data_pack
-        torch.cuda.empty_cache()
-        seed_everything(self.SEED)
-        model.eval()  # to get gradients, but never optimized
-        evaluator.eval()
-        gt_rgb, gt_mask, K, pose_b, pose_r, trans = data_pack[:6]
-        pose_b = pose_b.detach().clone()
-        pose_r = pose_r.detach().clone()
-        trans = trans.detach().clone()
-        pose_b.requires_grad_(True)
-        pose_r.requires_grad_(True)
-        trans.requires_grad_(True)
-        gt_rgb, gt_mask = gt_rgb.to(self.device), gt_mask.to(self.device)
-
-        optim_l = [
-            {"params": [pose_b], "lr": pose_base_lr},
-            {"params": [pose_r], "lr": pose_rest_lr},
-            {"params": [trans], "lr": trans_lr},
-        ]
-        optimizer_smpl = torch.optim.SGD(optim_l)
-
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer_smpl, step_size=decay_steps, gamma=decay_factor
-        )
-
-        loss_list, psnr_list, ssim_list, lpips_list = [], [], [], []
-        viz_step_list = []
-        for inner_step in range(steps):
-            # optimize
-            optimizer_smpl.zero_grad()
-            loss_recon, _, rendered_list, _, _, _, _ = self._fit_step(
-                model,
-                [gt_rgb, gt_mask, K, pose_b, pose_r, trans, None],
-                act_sph_ord=model.max_sph_order,
-                random_bg=False,
-                default_bg=[0.0, 0.0, 0.0],
-            )
-            loss = loss_recon
-            loss.backward()
-            optimizer_smpl.step()
-            scheduler.step()
-            loss_list.append(float(loss))
-
-            if (
-                inner_step % check_every_n_step == 0
-                or inner_step == steps - 1
-                and viz_fn is not None
-            ):
-                viz_step_list.append(inner_step)
-                with torch.no_grad():
-                    _check_results = [
-                        evaluator(
-                            rendered_list[0]["rgb"].permute(1, 2, 0)[None],
-                            gt_rgb[0][None],
-                        )
-                    ]
-                psnr = torch.stack([r["psnr"] for r in _check_results]).mean().item()
-                ssim = torch.stack([r["ssim"] for r in _check_results]).mean().item()
-                lpips = torch.stack([r["lpips"] for r in _check_results]).mean().item()
-                psnr_list.append(float(psnr))
-                ssim_list.append(float(ssim))
-                lpips_list.append(float(lpips))
-
-        if viz_fn is not None:
-            os.makedirs(osp.dirname(viz_fn), exist_ok=True)
-            plt.figure(figsize=(16, 4))
-            plt.subplot(1, 4, 1)
-            plt.plot(viz_step_list, psnr_list)
-            plt.title(f"PSNR={psnr_list[-1]}"), plt.grid()
-            plt.subplot(1, 4, 2)
-            plt.plot(viz_step_list, ssim_list)
-            plt.title(f"SSIM={ssim_list[-1]}"), plt.grid()
-            plt.subplot(1, 4, 3)
-            plt.plot(viz_step_list, lpips_list)
-            plt.title(f"LPIPS={lpips_list[-1]}"), plt.grid()
-            plt.subplot(1, 4, 4)
-            plt.plot(loss_list)
-            plt.title(f"Loss={loss_list[-1]}"), plt.grid()
-            plt.yscale("log")
-            plt.tight_layout()
-            plt.savefig(viz_fn)
-            plt.close()
-
-        return (
-            pose_b.detach().clone(),
-            pose_r.detach().clone(),
-            trans.detach().clone(),
-        )
-
-    @torch.no_grad()
-    def eval_fps(self, model, real_data_provider, rounds=1):
-        model.eval()
-        model.cache_for_fast()
-        logging.info(f"Model has {model.N} points.")
-        N_frames = len(real_data_provider.rgb_list)
-        ret = real_data_provider(N_frames)
-        gt_rgb, gt_mask, K, pose_base, pose_rest, global_trans, time_index = ret
-        pose = torch.cat([pose_base, pose_rest], 1)
-        H, W = gt_rgb.shape[1:3]
-        sph_o = model.max_sph_order
-        logging.info(f"FPS eval using active_sph_order: {sph_o}")
-        # run one iteration to check the output correctness
-        mu, fr, sc, op, sph, additional_ret = model(
-            pose[0:1],
-            global_trans[0:1],
-            additional_dict={},
-            active_sph_order=sph_o,
-            fast=True,
-        )
-        bg = [1.0, 1.0, 1.0]
-        render_pkg = render_cam_pcl(
-            mu[0], fr[0], sc[0], op[0], sph[0], H, W, K[0], False, sph_o, bg
-        )
-        pred = render_pkg["rgb"].permute(1, 2, 0).detach().cpu().numpy()
-        imageio.imsave(osp.join(self.log_dir, "fps_eval_sample.png"), pred)
-
-        logging.info("Start FPS test...")
-        start_t = time.time()
-
-        for j in tqdm(range(int(N_frames * rounds))):
-            i = j % N_frames
-            mu, fr, sc, op, sph, additional_ret = model(
-                pose[i : i + 1],
-                global_trans[i : i + 1],
-                additional_dict={"t": time_index},
-                active_sph_order=sph_o,
-                fast=True,
-            )
-            bg = [1.0, 1.0, 1.0]
-            render_pkg = render_cam_pcl(
-                mu[0], fr[0], sc[0], op[0], sph[0], H, W, K[0], False, sph_o, bg
-            )
-        end_t = time.time()
-
-        fps = (rounds * N_frames) / (end_t - start_t)
-        logging.info(f"FPS: {fps}")
-        with open(osp.join(self.log_dir, "fps.txt"), "w") as f:
-            f.write(f"FPS: {fps}")
-        return fps

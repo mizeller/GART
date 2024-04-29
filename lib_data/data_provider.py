@@ -9,10 +9,11 @@ from matplotlib import pyplot as plt
 
 class RealDataOptimizablePoseProviderPose(nn.Module):
     # separate the base_R and rest_R
-    def __init__(self, dataset, balance=True):
+    def __init__(self, dataset, balance=True, device=torch.device("cuda:0")):
         super().__init__()
         self.dataset = dataset
         self.balance = balance
+        self.device = device
         (
             rgb_list,
             mask_list,
@@ -35,13 +36,17 @@ class RealDataOptimizablePoseProviderPose(nn.Module):
         self.register_buffer("pose_list_original", pose_list.clone())
         self.register_buffer("global_trans_list_original", global_trans_list.clone())
 
+        #  move it to device
+        self.to(device)
+        self.move_images_to_device()
+
         return
 
-    def move_images_to_device(self, device):
-        self.rgb_list = self.rgb_list.to(device)
-        self.mask_list = self.mask_list.to(device)
-        self.K_list = self.K_list.to(device)
-        self.betas = self.betas.to(device)
+    def move_images_to_device(self):
+        self.rgb_list = self.rgb_list.to(self.device)
+        self.mask_list = self.mask_list.to(self.device)
+        self.K_list = self.K_list.to(self.device)
+        self.betas = self.betas.to(self.device)
 
     # TODO: remove laters
     # @property
